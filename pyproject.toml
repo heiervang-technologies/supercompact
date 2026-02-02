@@ -1,0 +1,10 @@
+[project]
+name = "compact-poc"
+version = "0.1.0"
+description = "Reranker-based conversation compaction for Claude Code JSONL histories"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.51.0",
+    "rich",
+]
