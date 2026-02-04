@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .parser import Turn, extract_text
-from .scorer import ScoredTurn
+from .types import ScoredTurn
 from .selector import SelectionResult
 
 

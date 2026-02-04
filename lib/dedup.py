@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .parser import Turn, extract_text
-from .scorer import ScoredTurn
+from .types import ScoredTurn
 
 
 # -- Suffix Automaton (online, O(n) construction) --

@@ -4,7 +4,13 @@ version = "0.1.0"
 description = "Reranker-based conversation compaction for Claude Code JSONL histories"
 requires-python = ">=3.11"
 dependencies = [
+    "rich",
+    "httpx>=0.27",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+torch = [
     "torch>=2.0",
     "transformers>=4.51.0",
-    "rich",
 ]

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .parser import Turn
-from .scorer import ScoredTurn
+from .types import ScoredTurn
 
 
 @dataclass
