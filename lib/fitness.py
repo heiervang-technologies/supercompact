@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 from .parser import Turn, extract_text
 from .tokenizer import turn_tokens
-from .scorer import ScoredTurn
+from .types import ScoredTurn
 from .selector import select_turns, SelectionResult
 
 
@@ -108,6 +108,8 @@ def evaluate(
     min_repeat_len: int = 64,
     device: str = "cpu",
     batch_size: int = 16,
+    embed_url: str = "http://localhost:8080",
+    rerank_url: str = "http://localhost:8181",
 ) -> FitnessResult:
     """Run a compaction method and evaluate its fitness.
 
@@ -179,11 +181,26 @@ def evaluate(
         from .dedup import dedup_scores
         scored = dedup_scores(prefix_turns, prefix_long, token_counts, min_repeat_len=min_repeat_len)
     elif method == "embed":
-        from .scorer import Scorer, build_query
+        from .scorer import Scorer
+        from .types import build_query
         user_turns = [t for t in prefix_turns if t.kind == "user"]
         scorer = Scorer(device=device)
         query = build_query(user_turns)
         scored = scorer.score_turns(prefix_long, query, token_counts, batch_size=batch_size)
+    elif method == "llama-embed":
+        from .llama_embed import LlamaEmbedScorer
+        from .types import build_query
+        user_turns = [t for t in prefix_turns if t.kind == "user"]
+        scorer = LlamaEmbedScorer(base_url=embed_url)
+        query = build_query(user_turns)
+        scored = scorer.score_turns(prefix_long, query, token_counts, batch_size=batch_size)
+    elif method == "llama-rerank":
+        from .llama_rerank import LlamaRerankScorer
+        from .types import build_query
+        user_turns = [t for t in prefix_turns if t.kind == "user"]
+        scorer = LlamaRerankScorer(base_url=rerank_url)
+        query = build_query(user_turns)
+        scored = scorer.score_turns(prefix_long, query, token_counts)
     else:
         raise ValueError(f"Unknown method: {method}")
 

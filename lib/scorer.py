@@ -7,9 +7,6 @@ since all documents can be encoded in a single batched forward pass.
 
 from __future__ import annotations
 
-import random
-from dataclasses import dataclass
-
 import logging
 
 import torch
@@ -21,6 +18,7 @@ from transformers import AutoModel, AutoTokenizer
 logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
 
 from .parser import Turn, extract_text
+from .types import ScoredTurn
 
 MODEL_ID = "Qwen/Qwen3-Embedding-0.6B"
 MAX_TOKENS = 8192
@@ -37,25 +35,6 @@ QUERY_INSTRUCTION = (
 DOC_INSTRUCTION = (
     "AI coding assistant response from a conversation history"
 )
-
-
-@dataclass
-class ScoredTurn:
-    """A turn with its relevance score."""
-
-    turn: Turn
-    score: float
-    tokens: int
-
-
-def build_query(user_turns: list[Turn], max_chars: int = 4000) -> str:
-    """Build a query from the last 2-3 user messages."""
-    recent = user_turns[-3:] if len(user_turns) >= 3 else user_turns
-    parts = [extract_text(t) for t in recent]
-    query = "\n---\n".join(parts)
-    if len(query) > max_chars:
-        query = query[-max_chars:]
-    return query
 
 
 def _last_token_pool(last_hidden_states: Tensor, attention_mask: Tensor) -> Tensor:
@@ -152,18 +131,3 @@ class Scorer:
             ))
 
         return results
-
-
-def random_scores(
-    system_turns: list[Turn],
-    token_counts: dict[int, int],
-) -> list[ScoredTurn]:
-    """Generate random scores for dry-run testing."""
-    return [
-        ScoredTurn(
-            turn=turn,
-            score=random.random(),
-            tokens=token_counts.get(turn.index, 0),
-        )
-        for turn in system_turns
-    ]

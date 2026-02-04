@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Conversation compaction for Claude Code JSONL histories.
 
-Two methods:
-  embed  — Qwen3-Embedding-0.6B cosine similarity scoring (needs GPU/CPU + model)
-  dedup  — Suffix automaton dedup, scores by unique content ratio (no model, instant)
+Methods:
+  embed        — Qwen3-Embedding-0.6B cosine similarity (needs GPU/CPU + torch)
+  dedup        — Suffix automaton dedup, unique content ratio (no model, instant)
+  llama-embed  — Qwen3-Embedding-0.6B via llama.cpp server (HTTP, no torch)
+  llama-rerank — Qwen3-Reranker-0.6B via llama.cpp server (HTTP, no torch)
 
 Usage:
     uv run compact.py JSONL_FILE --method embed [--budget 80000] [--device cuda:0]
     uv run compact.py JSONL_FILE --method dedup [--budget 80000] [--min-repeat-len 64]
+    uv run compact.py JSONL_FILE --method llama-embed --embed-url http://localhost:8080
+    uv run compact.py JSONL_FILE --method llama-rerank --rerank-url http://localhost:8181
     uv run compact.py JSONL_FILE --evaluate [--budget 80000]       # fitness benchmark
 """
 
@@ -23,7 +27,7 @@ from rich.table import Table
 
 from lib.parser import parse_jsonl, extract_text
 from lib.tokenizer import turn_tokens
-from lib.scorer import ScoredTurn, build_query, random_scores
+from lib.types import ScoredTurn, build_query, random_scores
 from lib.selector import select_turns
 from lib.formatter import print_stats, write_compacted_jsonl, write_scores_csv
 
@@ -34,7 +38,8 @@ def _run_evaluate(args: argparse.Namespace, turns: list) -> int:
     """Run fitness evaluation: benchmark method(s) on a split conversation."""
     from lib.fitness import evaluate, FitnessResult
 
-    methods = [args.method] if args.method != "all" else ["dedup", "embed"]
+    all_methods = ["dedup", "embed", "llama-embed", "llama-rerank"]
+    methods = [args.method] if args.method != "all" else all_methods
     results: list[FitnessResult] = []
 
     for method in methods:
@@ -49,6 +54,8 @@ def _run_evaluate(args: argparse.Namespace, turns: list) -> int:
                 min_repeat_len=args.min_repeat_len,
                 device=args.device,
                 batch_size=args.batch_size,
+                embed_url=args.embed_url,
+                rerank_url=args.rerank_url,
             )
             results.append(fr)
         except Exception as e:
@@ -103,7 +110,7 @@ def main() -> int:
         description="Compact Claude Code conversation histories."
     )
     parser.add_argument("jsonl_file", type=Path, help="Path to the JSONL conversation file")
-    parser.add_argument("--method", choices=["embed", "dedup", "all"], default="embed", help="Scoring method (default: embed, 'all' for evaluate mode)")
+    parser.add_argument("--method", choices=["embed", "dedup", "llama-embed", "llama-rerank", "all"], default="embed", help="Scoring method (default: embed, 'all' for evaluate mode)")
     parser.add_argument("--budget", type=int, default=80_000, help="Target token budget (default: 80000)")
     parser.add_argument("--short-threshold", type=int, default=300, help="System turns <= this many tokens are always kept (default: 300)")
     parser.add_argument("--device", type=str, default="cpu", help="PyTorch device for embed method (default: cpu)")
@@ -111,6 +118,8 @@ def main() -> int:
     parser.add_argument("--scores-file", type=Path, default=None, help="Write scores CSV to this file")
     parser.add_argument("--batch-size", type=int, default=16, help="Embedding batch size (default: 16)")
     parser.add_argument("--min-repeat-len", type=int, default=64, help="Min repeated substring length for dedup (default: 64)")
+    parser.add_argument("--embed-url", type=str, default="http://localhost:8080", help="llama.cpp embedding server URL (default: http://localhost:8080)")
+    parser.add_argument("--rerank-url", type=str, default="http://localhost:8181", help="llama.cpp reranker server URL (default: http://localhost:8181)")
     parser.add_argument("--evaluate", action="store_true", help="Run fitness evaluation (split conversation, measure recall)")
     parser.add_argument("--split-ratio", type=float, default=0.70, help="Prefix/suffix split for evaluation (default: 0.70)")
     parser.add_argument("--dry-run", action="store_true", help="Skip model loading, use random scores")
@@ -190,6 +199,30 @@ def main() -> int:
 
         console.print(f"Scoring {len(long_system)} turns (batch_size={args.batch_size})...")
         scored = scorer.score_turns(long_system, query, token_counts, batch_size=args.batch_size)
+
+    elif args.method == "llama-embed":
+        console.print(f"Connecting to llama.cpp embed server at {args.embed_url}...")
+        from lib.llama_embed import LlamaEmbedScorer
+        scorer = LlamaEmbedScorer(base_url=args.embed_url)
+
+        query = build_query(user_turns)
+        if args.verbose:
+            console.print(f"  Query ({len(query)} chars): {query[:200]}...")
+
+        console.print(f"Scoring {len(long_system)} turns (batch_size={args.batch_size})...")
+        scored = scorer.score_turns(long_system, query, token_counts, batch_size=args.batch_size)
+
+    elif args.method == "llama-rerank":
+        console.print(f"Connecting to llama.cpp rerank server at {args.rerank_url}...")
+        from lib.llama_rerank import LlamaRerankScorer
+        scorer = LlamaRerankScorer(base_url=args.rerank_url)
+
+        query = build_query(user_turns)
+        if args.verbose:
+            console.print(f"  Query ({len(query)} chars): {query[:200]}...")
+
+        console.print(f"Reranking {len(long_system)} turns...")
+        scored = scorer.score_turns(long_system, query, token_counts)
 
     # Select
     result = select_turns(
