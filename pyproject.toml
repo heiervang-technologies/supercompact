@@ -9,6 +9,7 @@ dependencies = [
     "numpy>=1.26",
     "matplotlib>=3.10.8",
     "transformers>=5.0.0",
+    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]
