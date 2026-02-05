@@ -108,6 +108,7 @@ def _run_evaluate(args: argparse.Namespace, turns: list) -> int:
 
 def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
     """Run LLM-as-Judge evaluation: probe generation, answer gen, scoring."""
+    import time as _time
     from lib.eval.probes import generate_probes, ProbeSet
     from lib.eval.cache import conv_hash, load_probes, save_probes, DEFAULT_CACHE_DIR
     from lib.eval.judge import generate_answers, score_answers, ANSWER_MODELS
@@ -157,7 +158,10 @@ def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
     # --- 3. For each method: compact, generate answers, score ---
     all_results = []
 
-    for method in methods:
+    for method_idx, method in enumerate(methods):
+        if method_idx > 0:
+            console.print("  [dim]Pausing 5s between methods (rate limits)...[/dim]")
+            _time.sleep(5)
         console.print(f"\n[bold]{'='*50}[/bold]")
         console.print(f"[bold]Evaluating: {method} (budget={args.budget:,})[/bold]")
 
@@ -172,13 +176,15 @@ def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
             for t in prefix_copy:
                 token_counts[t.index] = turn_tokens(t)
 
+            total_prefix_tokens = sum(token_counts.values())
             prefix_system = [t for t in prefix_copy if t.kind == "system"]
             prefix_long = [t for t in prefix_system
                            if token_counts.get(t.index, 0) > args.short_threshold]
             prefix_user = [t for t in prefix_copy if t.kind == "user"]
 
-            # Score turns using the compaction method
+            # Score turns using the compaction method (timed)
             scored: list[ScoredTurn]
+            t_compact_start = _time.monotonic()
 
             if method == "dedup":
                 from lib.dedup import dedup_scores
@@ -207,10 +213,12 @@ def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
                 short_threshold=args.short_threshold,
             )
 
+            compact_speed_s = _time.monotonic() - t_compact_start
+
             # Build compacted context string
             compacted_text = "\n\n".join(extract_text(t) for t in result.kept_turns)
             kept_tokens = sum(token_counts.get(t.index, 0) for t in result.kept_turns)
-            console.print(f"  Compacted to {kept_tokens:,} tokens ({len(result.kept_turns)} turns)")
+            console.print(f"  Compacted to {kept_tokens:,} tokens ({len(result.kept_turns)} turns) in {compact_speed_s:.1f}s")
 
         except Exception as e:
             console.print(f"[red]  Compaction error: {e}[/red]")
@@ -228,6 +236,10 @@ def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
 
         # Aggregate
         method_results = aggregate(answers, probe_set, method, args.budget)
+        for mr in method_results:
+            mr.speed_s = compact_speed_s
+            mr.kept_tokens = kept_tokens
+            mr.total_tokens = total_prefix_tokens
         all_results.extend(method_results)
 
     if not all_results:

@@ -95,6 +95,9 @@ def export_json(results: list[AggregateResult], output_path: Path) -> None:
             "model_label": r.model_label,
             "composite": r.composite,
             "ndcg": r.ndcg,
+            "speed_s": r.speed_s,
+            "kept_tokens": r.kept_tokens,
+            "total_tokens": r.total_tokens,
             "dimensions": {
                 d.dimension: {
                     "score": d.mean_score,

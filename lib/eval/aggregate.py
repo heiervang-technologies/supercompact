@@ -30,6 +30,9 @@ class AggregateResult:
     dimensions: list[DimensionScore] = field(default_factory=list)
     composite: float = 0.0     # weighted sum of dimension scores, 0-1
     ndcg: float = 0.0          # difficulty-weighted NDCG variant
+    speed_s: float = 0.0       # compaction wall time in seconds
+    kept_tokens: int = 0       # tokens in compacted output
+    total_tokens: int = 0      # tokens in full prefix
 
     @property
     def dimension_map(self) -> dict[str, DimensionScore]:

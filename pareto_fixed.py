@@ -2,11 +2,10 @@
 """Pareto plot: inference speed vs quality at multiple compression levels.
 
 Supports two Y-axis modes:
-  --metric recall    (legacy TF-IDF recall)
-  --metric composite (LLM-as-Judge composite score)
+  --metric recall    (legacy TF-IDF recall from pareto_fixed_results.json)
+  --metric composite (LLM-as-Judge composite from llm_eval_merged.json)
 
-128K token conversation prefix, budget at 3K.
-Includes Claude Code /compact as a generative baseline.
+128K token conversation prefix.
 """
 
 from __future__ import annotations
@@ -18,12 +17,10 @@ from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import numpy as np
 
 
 RESULTS_FILE = Path("pareto_fixed_results.json")
-LLM_RESULTS_FILE = Path("llm_eval_results.json")
-OUTPUT_FILE = Path("pareto_fixed.png")
+LLM_RESULTS_FILE = Path("llm_eval_merged.json")
 
 METHOD_STYLES = {
     "dedup":        {"color": "#e74c3c", "marker": "s",  "label": "Dedup (suffix automaton)"},
@@ -32,12 +29,17 @@ METHOD_STYLES = {
     "claude-code":  {"color": "#f39c12", "marker": "*",  "label": "Claude Code /compact"},
 }
 
+MODEL_KEY_STYLES = {
+    "capable": {"alpha": 1.0, "size_mult": 1.0, "suffix": ""},
+    "cheap":   {"alpha": 0.5, "size_mult": 0.6, "suffix": " (cheap)"},
+}
+
 
 def plot_pareto(results: list[dict], output_path: Path, metric: str = "recall"):
-    y_key = metric  # "recall" or "composite"
+    y_key = metric
     y_label = {
-        "recall": "Recall (TF-IDF vocabulary overlap)  \u2192  higher is better",
-        "composite": "Composite Score (LLM-as-Judge)  \u2192  higher is better",
+        "recall": "Recall (TF-IDF vocabulary overlap)  →  higher is better",
+        "composite": "Composite Score (LLM-as-Judge)  →  higher is better",
     }.get(metric, metric)
 
     fig, ax = plt.subplots(1, 1, figsize=(12, 8))
@@ -51,27 +53,46 @@ def plot_pareto(results: list[dict], output_path: Path, metric: str = "recall"):
         spine.set_color("#30363d")
     ax.grid(True, alpha=0.15, color="#484f58")
 
-    # Filter to results that have the metric
-    valid = [r for r in results if y_key in r]
+    # Filter to results that have the metric with a non-null value
+    valid = [r for r in results if r.get(y_key) is not None]
     if not valid:
         print(f"No results with metric '{y_key}' found")
         return
 
-    # Group by method, connect budget points with lines
-    methods_seen = {}
+    # For composite: separate capable vs cheap model; for recall: no model distinction
+    methods_seen_capable = {}
+    methods_seen_cheap = {}
+
     for r in valid:
         method = r["method"]
         style = METHOD_STYLES.get(method, {"color": "#888", "marker": "o", "label": method})
+        model_key = r.get("model_key", "capable")
 
-        label = style["label"] if method not in methods_seen else None
-        methods_seen[method] = True
+        # Skip recall_only entries (no composite score)
+        if model_key == "recall_only":
+            continue
 
-        marker_size = 250 if method == "claude-code" else 150
+        ms = MODEL_KEY_STYLES.get(model_key, MODEL_KEY_STYLES["capable"])
+        is_cheap = model_key == "cheap"
+        seen_map = methods_seen_cheap if is_cheap else methods_seen_capable
+
+        label = None
+        if method not in seen_map:
+            if is_cheap:
+                label = f"{style['label']} (cheap model)"
+            else:
+                label = style["label"]
+            seen_map[method] = True
+
+        base_size = 250 if method == "claude-code" else 150
+        marker_size = base_size * ms["size_mult"]
+
         ax.scatter(
             r["speed_s"], r[y_key],
             c=style["color"], marker=style["marker"],
             s=marker_size, label=label, zorder=5,
             edgecolors="white", linewidths=0.8,
+            alpha=ms["alpha"],
         )
 
         budget = r.get("budget", "?")
@@ -80,52 +101,65 @@ def plot_pareto(results: list[dict], output_path: Path, metric: str = "recall"):
         else:
             budget_label = str(budget)
 
-        # Annotation depends on available fields
-        if "kept_tokens" in r:
-            kept_k = r["kept_tokens"] / 1000
-            note = f'budget={budget_label}\n{kept_k:.1f}K kept'
-        else:
-            note = f'budget={budget_label}'
+        kept_k = r["kept_tokens"] / 1000 if "kept_tokens" in r else None
+        model_label = r.get("model_label", "")
 
-        if "model_label" in r:
-            note += f'\n{r["model_label"]}'
+        parts = [f"budget={budget_label}"]
+        if kept_k:
+            parts.append(f"{kept_k:.1f}K kept")
+        if model_label and metric == "composite":
+            parts.append(model_label)
+        note = "\n".join(parts)
+
+        # Offset annotations for cheap model to avoid overlap
+        offset_y = -18 if is_cheap else -4
 
         ax.annotate(
             note,
             (r["speed_s"], r[y_key]),
             textcoords="offset points",
-            xytext=(14, -4),
-            fontsize=8,
+            xytext=(14, offset_y),
+            fontsize=7 if is_cheap else 8,
             color=style["color"],
-            alpha=0.9,
+            alpha=ms["alpha"] * 0.9,
         )
 
-    # Connect same-method points across budgets
-    for method in METHOD_STYLES:
-        pts = [r for r in valid if r["method"] == method]
-        if len(pts) >= 2:
-            pts_sorted = sorted(pts, key=lambda p: p["speed_s"])
-            style = METHOD_STYLES[method]
-            ax.plot(
-                [p["speed_s"] for p in pts_sorted],
-                [p[y_key] for p in pts_sorted],
-                color=style["color"], alpha=0.3, linewidth=1.5,
-                linestyle="--", zorder=3,
-            )
+    # Connect same-method + same-model_key points across budgets
+    for model_key in ["capable", "cheap"]:
+        for method in METHOD_STYLES:
+            pts = [r for r in valid
+                   if r["method"] == method
+                   and r.get("model_key", "capable") == model_key
+                   and r.get(y_key) is not None]
+            if len(pts) >= 2:
+                pts_sorted = sorted(pts, key=lambda p: p["speed_s"])
+                style = METHOD_STYLES[method]
+                ms = MODEL_KEY_STYLES.get(model_key, MODEL_KEY_STYLES["capable"])
+                ax.plot(
+                    [p["speed_s"] for p in pts_sorted],
+                    [p[y_key] for p in pts_sorted],
+                    color=style["color"], alpha=0.2 * ms["alpha"],
+                    linewidth=1.5, linestyle="--", zorder=3,
+                )
 
     ax.set_xscale("log")
-    ax.set_xlabel("Inference Speed (seconds, log scale)  \u2192  lower is better", fontsize=12)
+    ax.set_xlabel("Compaction Speed (seconds, log scale)  →  lower is better", fontsize=12)
     ax.set_ylabel(y_label, fontsize=12)
 
     metric_display = "LLM Composite" if metric == "composite" else "TF-IDF Recall"
+
+    # Determine budget range from data
+    budgets = sorted({r["budget"] for r in valid if r.get(y_key) is not None})
+    budget_str = ", ".join(f"{b//1000}K" if b >= 1000 else str(b) for b in budgets)
+
     ax.set_title(
         f"Compaction Methods: Speed vs {metric_display}\n"
-        f"128K token prefix  |  budget: 3K",
+        f"82K token prefix  |  budgets: {budget_str}",
         fontsize=14, fontweight="bold",
     )
 
     ax.legend(
-        loc="upper left", fontsize=10,
+        loc="best", fontsize=9,
         facecolor="#161b22", edgecolor="#30363d", labelcolor="#c9d1d9",
     )
 

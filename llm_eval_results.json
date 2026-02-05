@@ -1,0 +1,142 @@
+[
+  {
+    "method": "dedup",
+    "budget": 3000,
+    "model_key": "capable",
+    "model_label": "Opus-4.5",
+    "composite": 0.7888888888888889,
+    "ndcg": 0.7889898136323291,
+    "dimensions": {
+      "error_solution": {
+        "score": 0.9166666666666666,
+        "weight": 0.3,
+        "probe_count": 8,
+        "raw_scores": [
+          3,
+          3,
+          3,
+          2,
+          2,
+          3,
+          3,
+          3
+        ]
+      },
+      "instruction": {
+        "score": 1.0,
+        "weight": 0.25,
+        "probe_count": 6,
+        "raw_scores": [
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ]
+      },
+      "progress": {
+        "score": 0.5555555555555556,
+        "weight": 0.25,
+        "probe_count": 6,
+        "raw_scores": [
+          3,
+          0,
+          0,
+          3,
+          2,
+          2
+        ]
+      },
+      "environment": {
+        "score": 0.6666666666666666,
+        "weight": 0.15,
+        "probe_count": 3,
+        "raw_scores": [
+          0,
+          3,
+          3
+        ]
+      },
+      "noise": {
+        "score": 0.5,
+        "weight": 0.05,
+        "probe_count": 2,
+        "raw_scores": [
+          1,
+          2
+        ]
+      }
+    }
+  },
+  {
+    "method": "dedup",
+    "budget": 3000,
+    "model_key": "cheap",
+    "model_label": "Kimi-K2.5",
+    "composite": 0.7569444444444444,
+    "ndcg": 0.6435246903749031,
+    "dimensions": {
+      "error_solution": {
+        "score": 0.875,
+        "weight": 0.3,
+        "probe_count": 8,
+        "raw_scores": [
+          3,
+          3,
+          3,
+          0,
+          3,
+          3,
+          3,
+          3
+        ]
+      },
+      "instruction": {
+        "score": 1.0,
+        "weight": 0.25,
+        "probe_count": 6,
+        "raw_scores": [
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ]
+      },
+      "progress": {
+        "score": 0.4444444444444444,
+        "weight": 0.25,
+        "probe_count": 6,
+        "raw_scores": [
+          3,
+          0,
+          0,
+          0,
+          3,
+          2
+        ]
+      },
+      "environment": {
+        "score": 0.6666666666666666,
+        "weight": 0.15,
+        "probe_count": 3,
+        "raw_scores": [
+          0,
+          3,
+          3
+        ]
+      },
+      "noise": {
+        "score": 0.6666666666666666,
+        "weight": 0.05,
+        "probe_count": 2,
+        "raw_scores": [
+          2,
+          2
+        ]
+      }
+    }
+  }
+]
