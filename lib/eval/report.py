@@ -111,3 +111,63 @@ def export_json(results: list[AggregateResult], output_path: Path) -> None:
         data.append(entry)
     output_path.write_text(json.dumps(data, indent=2))
     console.print(f"Results exported to {output_path}")
+
+
+def export_trace(
+    method: str,
+    budget: int,
+    probe_set,
+    answers: list,
+    trace_dir: Path,
+) -> Path:
+    """Export full trace: probes, prompts, answers, scores, judge reasoning.
+
+    Writes a JSON file per method/budget with every detail needed to audit.
+    """
+    from .judge import _ANSWER_SYSTEM, _JUDGE_SYSTEM
+
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    out_path = trace_dir / f"trace_{method}_{budget}.json"
+
+    probe_map = {p.id: p for p in probe_set.probes}
+    entries = []
+
+    for a in answers:
+        probe = probe_map.get(a.probe_id)
+        if not probe:
+            continue
+
+        entries.append({
+            "probe_id": a.probe_id,
+            "dimension": probe.dimension,
+            "tier": probe.tier,
+            "difficulty": probe.difficulty,
+            "model_key": a.model_key,
+            "model_label": a.model_label,
+            "question": probe.question,
+            "gold_answer": probe.gold_answer,
+            "evidence_turns": probe.evidence_turns,
+            "answer_system_prompt": _ANSWER_SYSTEM,
+            "answer_user_prompt_template": "<context>\\n{compacted_context}\\n</context>\\n\\nQuestion: {question}",
+            "generated_answer": a.answer,
+            "judge_system_prompt": _JUDGE_SYSTEM,
+            "judge_user_prompt": (
+                f"Question: {probe.question}\n\n"
+                f"Gold answer: {probe.gold_answer}\n\n"
+                f"Candidate answer: {a.answer}"
+            ),
+            "score": a.score,
+            "judge_reasoning": a.judge_reasoning,
+        })
+
+    data = {
+        "method": method,
+        "budget": budget,
+        "probe_count": len(probe_set.probes),
+        "answer_count": len(entries),
+        "entries": entries,
+    }
+
+    out_path.write_text(json.dumps(data, indent=2))
+    console.print(f"Trace exported to {out_path}")
+    return out_path

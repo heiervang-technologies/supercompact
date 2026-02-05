@@ -113,7 +113,7 @@ def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
     from lib.eval.cache import conv_hash, load_probes, save_probes, DEFAULT_CACHE_DIR
     from lib.eval.judge import generate_answers, score_answers, ANSWER_MODELS
     from lib.eval.aggregate import aggregate
-    from lib.eval.report import print_results, export_json
+    from lib.eval.report import print_results, export_json, export_trace
 
     cache_dir = args.probe_cache
     all_methods = ["dedup", "llama-embed", "llama-rerank"]
@@ -241,6 +241,9 @@ def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
             mr.kept_tokens = kept_tokens
             mr.total_tokens = total_prefix_tokens
         all_results.extend(method_results)
+
+        # Export trace (prompts + answers + scores)
+        export_trace(method, args.budget, probe_set, answers, cache_dir)
 
     if not all_results:
         console.print("[red]No results.[/red]")
