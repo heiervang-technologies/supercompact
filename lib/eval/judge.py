@@ -5,32 +5,31 @@ Two-step process:
    Run with two models (cheap + capable) to test if model capability masks context gaps.
 2. Scoring: Judge each answer against the gold answer on a 0-3 rubric.
 
-Model backends:
-- Anthropic API: claude-opus-4-5-20251101 (capable answer gen + judge)
-- OpenRouter (OpenAI-compatible): moonshotai/kimi-k2.5 (cheap answer gen)
+All API calls go through OpenRouter (OpenAI-compatible), which supports both
+Anthropic and third-party models with a single API key.
 """
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
 
-import anthropic
+import httpx
 
 from .probes import Probe, ProbeSet
 
 
 # --- Model configuration ---
 
-JUDGE_MODEL = "claude-opus-4-5-20251101"
+JUDGE_MODEL = "anthropic/claude-opus-4-5"
 
 ANSWER_MODELS = {
     "capable": {
-        "backend": "anthropic",
-        "model": "claude-opus-4-5-20251101",
+        "model": "anthropic/claude-opus-4-5",
         "label": "Opus-4.5",
     },
     "cheap": {
-        "backend": "openrouter",
         "model": "moonshotai/kimi-k2.5",
         "label": "Kimi-K2.5",
     },
@@ -56,29 +55,14 @@ class JudgeResult:
     answers: list[ProbeAnswer] = field(default_factory=list)
 
 
-# --- API clients ---
-
-def _anthropic_generate(model: str, system: str, user: str, max_tokens: int = 1024) -> str:
-    client = anthropic.Anthropic()
-    resp = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    return resp.content[0].text.strip()
-
+# --- API client (OpenRouter) ---
 
 def _openrouter_generate(model: str, system: str, user: str, max_tokens: int = 1024) -> str:
-    """Call OpenRouter's OpenAI-compatible API using httpx."""
-    import os
-    import httpx
-
+    """Call OpenRouter's OpenAI-compatible API."""
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
         raise RuntimeError(
-            "OPENROUTER_API_KEY env var required for OpenRouter models. "
-            "Get one at https://openrouter.ai/keys"
+            "OPENROUTER_API_KEY env var required. Get one at https://openrouter.ai/keys"
         )
 
     resp = httpx.post(
@@ -95,19 +79,10 @@ def _openrouter_generate(model: str, system: str, user: str, max_tokens: int = 1
                 {"role": "user", "content": user},
             ],
         },
-        timeout=120.0,
+        timeout=180.0,
     )
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"].strip()
-
-
-def _generate(backend: str, model: str, system: str, user: str, max_tokens: int = 1024) -> str:
-    if backend == "anthropic":
-        return _anthropic_generate(model, system, user, max_tokens)
-    elif backend == "openrouter":
-        return _openrouter_generate(model, system, user, max_tokens)
-    else:
-        raise ValueError(f"Unknown backend: {backend}")
 
 
 # --- Answer generation ---
@@ -130,7 +105,7 @@ def generate_answers(
         compacted_context: The compacted conversation text.
         probe_set: The set of probes to answer.
         model_configs: Override default ANSWER_MODELS. Keys are model_key names,
-            values have 'backend', 'model', 'label'.
+            values have 'model', 'label'.
 
     Returns:
         List of ProbeAnswer objects (one per probe per model).
@@ -145,8 +120,7 @@ def generate_answers(
                 f"Question: {probe.question}"
             )
             try:
-                text = _generate(
-                    backend=cfg["backend"],
+                text = _openrouter_generate(
                     model=cfg["model"],
                     system=_ANSWER_SYSTEM,
                     user=user_prompt,
@@ -190,8 +164,6 @@ def score_answers(
     Mutates the answers in-place (sets score and judge_reasoning).
     Returns the same list for convenience.
     """
-    import json
-
     judge = judge_model or JUDGE_MODEL
     probe_map = {p.id: p for p in probe_set.probes}
 
@@ -209,7 +181,7 @@ def score_answers(
         )
 
         try:
-            raw = _anthropic_generate(
+            raw = _openrouter_generate(
                 model=judge,
                 system=_JUDGE_SYSTEM,
                 user=user_prompt,

@@ -7,9 +7,10 @@ Probes are generated once per (conversation, split_ratio) pair and cached to dis
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field, asdict
 
-import anthropic
+import httpx
 
 from ..parser import Turn, extract_text
 
@@ -22,7 +23,7 @@ DIMENSIONS = {
     "noise": 0.05,
 }
 
-PROBE_GEN_MODEL = "claude-opus-4-5-20251101"
+PROBE_GEN_MODEL = "anthropic/claude-opus-4-5"
 
 
 @dataclass
@@ -150,7 +151,7 @@ def generate_probes(
     num_probes: int = 25,
     model: str | None = None,
 ) -> ProbeSet:
-    """Generate probes from the full conversation using Claude API.
+    """Generate probes from the full conversation via OpenRouter.
 
     Args:
         prefix_turns: The prefix portion of the conversation.
@@ -162,7 +163,12 @@ def generate_probes(
         model: Override the default probe generation model.
     """
     model = model or PROBE_GEN_MODEL
-    client = anthropic.Anthropic()
+
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY env var required. Get one at https://openrouter.ai/keys"
+        )
 
     # Format the full conversation for the probe generator
     all_turns = prefix_turns + suffix_turns
@@ -173,19 +179,28 @@ def generate_probes(
         num_probes=num_probes,
     )
 
-    response = client.messages.create(
-        model=model,
-        max_tokens=8192,
-        messages=[
-            {
-                "role": "user",
-                "content": f"{prompt}\n\n<conversation>\n{conversation_text}\n</conversation>",
-            }
-        ],
+    resp = httpx.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "max_tokens": 8192,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": f"{prompt}\n\n<conversation>\n{conversation_text}\n</conversation>",
+                }
+            ],
+        },
+        timeout=300.0,
     )
+    resp.raise_for_status()
 
     # Parse the response
-    text = response.content[0].text.strip()
+    text = resp.json()["choices"][0]["message"]["content"].strip()
     # Handle potential markdown code fences
     if text.startswith("```"):
         text = text.split("\n", 1)[1]  # remove opening fence

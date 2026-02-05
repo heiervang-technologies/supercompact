@@ -261,7 +261,7 @@ def main() -> int:
     parser.add_argument("--evaluate", action="store_true", help="Run fitness evaluation (split conversation, measure recall)")
     parser.add_argument("--evaluate-llm", action="store_true", help="Run LLM-as-Judge evaluation (comprehension probes)")
     parser.add_argument("--split-ratio", type=float, default=0.70, help="Prefix/suffix split for evaluation (default: 0.70)")
-    parser.add_argument("--judge-model", type=str, default="claude-opus-4-5-20251101", help="Model for probe generation and judging (default: claude-opus-4-5-20251101)")
+    parser.add_argument("--judge-model", type=str, default="anthropic/claude-opus-4-5", help="Model for probe generation and judging (default: anthropic/claude-opus-4-5)")
     parser.add_argument("--probe-cache", type=Path, default=Path("eval_cache"), help="Directory for cached probe sets (default: eval_cache)")
     parser.add_argument("--regenerate-probes", action="store_true", help="Force regeneration of probes even if cached")
     parser.add_argument("--eval-output", type=Path, default=None, help="Export LLM eval results as JSON")
