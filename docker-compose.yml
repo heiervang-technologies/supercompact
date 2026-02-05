@@ -2,10 +2,10 @@ services:
   embed:
     image: ghcr.io/ggml-org/llama.cpp:server
     ports:
-      - "8080:8080"
+      - "8082:8080"
     command: >
       --hf-repo Qwen/Qwen3-Embedding-0.6B-GGUF
-      --hf-file qwen3-embedding-0.6b-q8_0.gguf
+      --hf-file Qwen3-Embedding-0.6B-Q8_0.gguf
       --embedding --pooling last
       -ub 8192
       --host 0.0.0.0 --port 8080
@@ -21,7 +21,8 @@ services:
       --hf-repo ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF
       --hf-file qwen3-reranker-0.6b-q8_0.gguf
       --rerank
-      -c 4096
+      -c 8192
+      -ub 8192
       --host 0.0.0.0 --port 8181
       --no-webui
     volumes:

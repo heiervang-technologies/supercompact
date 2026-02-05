@@ -1,0 +1,9 @@
+{
+  "method": "claude-code",
+  "recall": 0.03086273174862927,
+  "speed_s": 80.0,
+  "compression": 0.030182997253757903,
+  "summary_tokens": 3528,
+  "prefix_tokens": 116887,
+  "f1": 0.0598217411010642
+}
