@@ -28,7 +28,7 @@ from rich.console import Console
 from rich.table import Table
 
 from lib.parser import parse_jsonl, extract_text
-from lib.tokenizer import turn_tokens
+from lib.tokenizer import turn_tokens, estimate_tokens
 from lib.types import ScoredTurn, build_query, random_scores
 from lib.selector import select_turns
 from lib.formatter import print_stats, write_compacted_jsonl, write_scores_csv
@@ -40,7 +40,7 @@ def _run_evaluate(args: argparse.Namespace, turns: list) -> int:
     """Run fitness evaluation: benchmark method(s) on a split conversation."""
     from lib.fitness import evaluate, FitnessResult
 
-    all_methods = ["dedup", "embed", "llama-embed", "llama-rerank"]
+    all_methods = ["dedup", "eitf", "embed", "llama-embed", "llama-rerank"]
     methods = [args.method] if args.method != "all" else all_methods
     results: list[FitnessResult] = []
 
@@ -117,7 +117,7 @@ def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
     from lib.eval.report import print_results, export_json, export_trace
 
     cache_dir = args.probe_cache
-    all_methods = ["dedup", "llama-embed", "llama-rerank"]
+    all_methods = ["dedup", "eitf", "llama-embed", "llama-rerank"]
     methods = [args.method] if args.method != "all" else all_methods
 
     # --- 1. Split conversation ---
@@ -337,6 +337,45 @@ def _run_evaluate_v2(args: argparse.Namespace, turns: list) -> int:
                 token_counts[t.index] = turn_tokens(t)
 
             total_prefix_tokens = sum(token_counts.values())
+
+            t_compact_start = _time.monotonic()
+
+            # --- claude-code: LLM summarization (different path) ---
+            if method == "claude-code":
+                from lib.llm_compact import llm_compact, make_synthetic_turn
+
+                console.print("  Calling Claude via OpenRouter for summarization...")
+                summary = llm_compact(prefix_copy, args.budget)
+                compact_speed_s = _time.monotonic() - t_compact_start
+
+                synthetic_turn = make_synthetic_turn(summary)
+                kept_tokens = estimate_tokens(summary)
+                console.print(
+                    f"  Summary: {kept_tokens:,} tokens in {compact_speed_s:.1f}s"
+                )
+
+                # Entity coverage from summary
+                kept_entities = extract_entities(summary)
+                cov, wcov, type_breakdown = compute_coverage(suffix_entities, kept_entities)
+
+                ent_result = EntityCoverageResult(
+                    method=method,
+                    budget=args.budget,
+                    speed_s=compact_speed_s,
+                    coverage=cov,
+                    weighted_coverage=wcov,
+                    type_coverage=type_breakdown,
+                    total_tokens=total_prefix_tokens,
+                    kept_tokens=kept_tokens,
+                    compression=kept_tokens / total_prefix_tokens if total_prefix_tokens > 0 else 0,
+                    suffix_entity_count=suffix_entities.total_count,
+                    prefix_entity_count=kept_entities.total_count,
+                    covered_count=len(suffix_entities.all_entities() & kept_entities.all_entities()),
+                )
+                entity_results.append(ent_result)
+                continue
+
+            # --- Standard score-and-select methods ---
             prefix_system = [t for t in prefix_copy if t.kind == "system"]
             prefix_long = [t for t in prefix_system
                            if token_counts.get(t.index, 0) > args.short_threshold]
@@ -344,12 +383,14 @@ def _run_evaluate_v2(args: argparse.Namespace, turns: list) -> int:
 
             # Score turns
             scored: list[ScoredTurn]
-            t_compact_start = _time.monotonic()
 
             if method == "dedup":
                 from lib.dedup import dedup_scores
                 scored = dedup_scores(prefix_copy, prefix_long, token_counts,
                                       min_repeat_len=args.min_repeat_len)
+            elif method == "eitf":
+                from lib.eitf import eitf_scores
+                scored = eitf_scores(prefix_copy, prefix_long, token_counts)
             elif method == "llama-embed":
                 from lib.llama_embed import LlamaEmbedScorer
                 scorer = LlamaEmbedScorer(base_url=args.embed_url)
@@ -553,7 +594,7 @@ def main() -> int:
         description="Compact Claude Code conversation histories."
     )
     parser.add_argument("jsonl_file", type=Path, help="Path to the JSONL conversation file")
-    parser.add_argument("--method", choices=["embed", "dedup", "llama-embed", "llama-rerank", "all"], default="embed", help="Scoring method (default: embed, 'all' for evaluate mode)")
+    parser.add_argument("--method", choices=["embed", "dedup", "eitf", "llama-embed", "llama-rerank", "claude-code", "all"], default="embed", help="Scoring method (default: embed, 'all' for evaluate mode)")
     parser.add_argument("--budget", type=int, default=3_000, help="Target token budget (default: 3000)")
     parser.add_argument("--short-threshold", type=int, default=300, help="System turns <= this many tokens are always kept (default: 300)")
     parser.add_argument("--device", type=str, default="cpu", help="PyTorch device for embed method (default: cpu)")
@@ -640,6 +681,11 @@ def main() -> int:
         console.print(f"Dedup scoring (min_repeat_len={args.min_repeat_len})...")
         from lib.dedup import dedup_scores
         scored = dedup_scores(turns, long_system, token_counts, min_repeat_len=args.min_repeat_len)
+
+    elif args.method == "eitf":
+        console.print("EITF scoring (entity-frequency inverse turn frequency)...")
+        from lib.eitf import eitf_scores
+        scored = eitf_scores(turns, long_system, token_counts)
 
     elif args.method == "embed":
         console.print(f"Loading embedding model on {args.device}...")
