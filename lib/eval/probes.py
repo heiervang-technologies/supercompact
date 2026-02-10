@@ -23,7 +23,7 @@ DIMENSIONS = {
     "noise": 0.05,
 }
 
-PROBE_GEN_MODEL = "anthropic/claude-opus-4-5"
+PROBE_GEN_MODEL = "stepfun/step-3.5-flash:free"
 
 
 @dataclass

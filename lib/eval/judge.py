@@ -25,23 +25,24 @@ from .probes import Probe, ProbeSet
 
 # --- Model configuration ---
 
-JUDGE_MODEL = "anthropic/claude-opus-4-5"
+JUDGE_MODEL = "stepfun/step-3.5-flash:free"
 
 ANSWER_MODELS = {
     "capable": {
-        "model": "anthropic/claude-opus-4-5",
-        "label": "Opus-4.5",
+        "model": "stepfun/step-3.5-flash:free",
+        "label": "Step-3.5-Flash",
     },
     "cheap": {
-        "model": "moonshotai/kimi-k2.5",
-        "label": "Kimi-K2.5",
+        "model": "deepseek/deepseek-r1-0528:free",
+        "label": "DeepSeek-R1",
     },
 }
 
-# Max concurrent API requests (avoid rate limits)
-MAX_CONCURRENCY = 5
-MAX_RETRIES = 3
-RETRY_BASE_DELAY = 2.0  # seconds, doubled each retry
+# Max concurrent API requests (1 = sequential, safe for free-tier models)
+MAX_CONCURRENCY = 1
+MAX_RETRIES = 5
+RETRY_BASE_DELAY = 3.0  # seconds, doubled each retry
+REQUEST_DELAY = 2.0     # seconds between sequential requests (free-tier rate limits)
 
 
 # --- Data types ---
@@ -99,7 +100,11 @@ async def _openrouter_generate_async(
                 timeout=180.0,
             )
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            # Throttle for free-tier rate limits
+            if REQUEST_DELAY > 0:
+                await asyncio.sleep(REQUEST_DELAY)
+            return content
         except (httpx.HTTPStatusError, httpx.ReadTimeout, httpx.ConnectError) as e:
             last_err = e
             delay = RETRY_BASE_DELAY * (2 ** attempt)
@@ -118,6 +123,9 @@ on what you can determine from the provided context. If the context doesn't \
 contain enough information, say so explicitly. Be specific and concise."""
 
 
+_answer_counter = 0
+_answer_total = 0
+
 async def _generate_one_answer(
     client: httpx.AsyncClient,
     sem: asyncio.Semaphore,
@@ -127,6 +135,7 @@ async def _generate_one_answer(
     probe: Probe,
     compacted_context: str,
 ) -> ProbeAnswer:
+    global _answer_counter
     user_prompt = (
         f"<context>\n{compacted_context}\n</context>\n\n"
         f"Question: {probe.question}"
@@ -138,6 +147,8 @@ async def _generate_one_answer(
             )
         except Exception as e:
             text = f"[ERROR: {e}]"
+        _answer_counter += 1
+        print(f"    answer {_answer_counter}/{_answer_total} [{model_key}] {probe.id}", flush=True)
 
     return ProbeAnswer(
         probe_id=probe.id,
@@ -152,8 +163,11 @@ async def _generate_answers_async(
     probe_set: ProbeSet,
     model_configs: dict[str, dict] | None = None,
 ) -> list[ProbeAnswer]:
+    global _answer_counter, _answer_total
     configs = model_configs or ANSWER_MODELS
     sem = asyncio.Semaphore(MAX_CONCURRENCY)
+    _answer_counter = 0
+    _answer_total = len(probe_set.probes) * len(configs)
 
     async with httpx.AsyncClient() as client:
         tasks = []
@@ -195,6 +209,9 @@ Respond with ONLY a JSON object: {"score": N, "reasoning": "brief explanation"}
 No other text."""
 
 
+_score_counter = 0
+_score_total = 0
+
 async def _score_one_answer(
     client: httpx.AsyncClient,
     sem: asyncio.Semaphore,
@@ -203,6 +220,7 @@ async def _score_one_answer(
     judge: str,
 ) -> None:
     """Score a single answer in-place."""
+    global _score_counter
     user_prompt = (
         f"Question: {probe.question}\n\n"
         f"Gold answer: {probe.gold_answer}\n\n"
@@ -226,6 +244,8 @@ async def _score_one_answer(
         except Exception as e:
             answer.score = 0
             answer.judge_reasoning = f"Judge error: {e}"
+        _score_counter += 1
+        print(f"    score {_score_counter}/{_score_total} [{answer.model_key}] {answer.probe_id} -> {answer.score}", flush=True)
 
 
 async def _score_answers_async(
@@ -233,9 +253,12 @@ async def _score_answers_async(
     probe_set: ProbeSet,
     judge_model: str | None = None,
 ) -> list[ProbeAnswer]:
+    global _score_counter, _score_total
     judge = judge_model or JUDGE_MODEL
     probe_map = {p.id: p for p in probe_set.probes}
     sem = asyncio.Semaphore(MAX_CONCURRENCY)
+    _score_counter = 0
+    _score_total = len(answers)
 
     async with httpx.AsyncClient() as client:
         tasks = []

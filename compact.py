@@ -14,6 +14,7 @@ Usage:
     uv run compact.py JSONL_FILE --method llama-rerank --rerank-url http://localhost:8181
     uv run compact.py JSONL_FILE --evaluate [--budget 80000]       # fitness benchmark
     uv run compact.py JSONL_FILE --evaluate-llm --method all --budget 3000  # LLM-as-Judge
+    uv run compact.py JSONL_FILE --evaluate-v2 --method all --budget 3000   # v2 metrics
 """
 
 from __future__ import annotations
@@ -157,6 +158,7 @@ def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
 
     # --- 3. For each method: compact, generate answers, score ---
     all_results = []
+    _seen_hashes: dict[str, str] = {}  # text_hash -> method name (skip identical output)
 
     for method_idx, method in enumerate(methods):
         if method_idx > 0:
@@ -226,6 +228,22 @@ def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
             traceback.print_exc()
             continue
 
+        # Skip if compacted text is identical to a previous method
+        import hashlib
+        text_hash = hashlib.sha256(compacted_text.encode()).hexdigest()[:16]
+        if text_hash in _seen_hashes:
+            prev_method = _seen_hashes[text_hash]
+            console.print(f"  [yellow]Identical output to {prev_method} — reusing scores[/yellow]")
+            prev = [r for r in all_results if r.method == prev_method]
+            for pr in prev:
+                from copy import deepcopy
+                clone = deepcopy(pr)
+                clone.method = method
+                clone.speed_s = compact_speed_s
+                all_results.append(clone)
+            continue
+        _seen_hashes[text_hash] = method
+
         # Generate answers
         console.print("  Generating answers...")
         answers = generate_answers(compacted_text, probe_set)
@@ -258,6 +276,278 @@ def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
     return 0
 
 
+def _run_evaluate_v2(args: argparse.Namespace, turns: list) -> int:
+    """Run v2 evaluation: evidence coverage + entity coverage (no LLM calls)."""
+    import json
+    import time as _time
+    from lib.eval.cache import conv_hash, load_probes, DEFAULT_CACHE_DIR
+    from lib.eval.evidence_coverage import compute_evidence_coverage, EvidenceCoverageResult
+    from lib.eval.entity_coverage import (
+        extract_entities, compute_coverage, EntityCoverageResult, ENTITY_TYPES,
+    )
+
+    cache_dir = args.probe_cache
+    all_methods = ["dedup", "llama-embed", "llama-rerank"]
+    methods = [args.method] if args.method != "all" else all_methods
+
+    # --- 1. Split conversation ---
+    split_idx = int(len(turns) * args.split_ratio)
+    while split_idx < len(turns) and turns[split_idx].kind != "user":
+        split_idx += 1
+
+    prefix_turns = turns[:split_idx]
+    suffix_turns = turns[split_idx:]
+
+    if not prefix_turns or not suffix_turns:
+        console.print("[red]Split produced empty prefix or suffix.[/red]")
+        return 1
+
+    console.print(f"Split: {len(prefix_turns)} prefix / {len(suffix_turns)} suffix turns")
+
+    # --- 2. Load cached probes (optional — evidence coverage needs them) ---
+    key = conv_hash(args.jsonl_file, args.split_ratio)
+    probe_set = load_probes(cache_dir, key)
+
+    if probe_set is not None:
+        console.print(f"Loaded {len(probe_set.probes)} cached probes")
+    else:
+        console.print("[dim]No cached probes found — skipping evidence coverage[/dim]")
+
+    # --- 3. For each method: compact prefix, compute coverage metrics ---
+    evidence_results: list[EvidenceCoverageResult] = []
+    entity_results: list[EntityCoverageResult] = []
+
+    # Extract suffix entities once (shared across methods)
+    suffix_texts = [extract_text(t) for t in suffix_turns if t.kind == "system"]
+    suffix_entities = extract_entities("\n".join(suffix_texts))
+    console.print(f"Extracted {suffix_entities.total_count} entities from suffix")
+
+    for method in methods:
+        console.print(f"\n[bold]{'='*50}[/bold]")
+        console.print(f"[bold]Evaluating: {method} (budget={args.budget:,})[/bold]")
+
+        try:
+            # Re-index prefix turns
+            prefix_copy = [t for t in prefix_turns]
+            for i, t in enumerate(prefix_copy):
+                t.index = i
+
+            token_counts: dict[int, int] = {}
+            for t in prefix_copy:
+                token_counts[t.index] = turn_tokens(t)
+
+            total_prefix_tokens = sum(token_counts.values())
+            prefix_system = [t for t in prefix_copy if t.kind == "system"]
+            prefix_long = [t for t in prefix_system
+                           if token_counts.get(t.index, 0) > args.short_threshold]
+            prefix_user = [t for t in prefix_copy if t.kind == "user"]
+
+            # Score turns
+            scored: list[ScoredTurn]
+            t_compact_start = _time.monotonic()
+
+            if method == "dedup":
+                from lib.dedup import dedup_scores
+                scored = dedup_scores(prefix_copy, prefix_long, token_counts,
+                                      min_repeat_len=args.min_repeat_len)
+            elif method == "llama-embed":
+                from lib.llama_embed import LlamaEmbedScorer
+                scorer = LlamaEmbedScorer(base_url=args.embed_url)
+                query = build_query(prefix_user)
+                scored = scorer.score_turns(prefix_long, query, token_counts,
+                                            batch_size=args.batch_size)
+            elif method == "llama-rerank":
+                from lib.llama_rerank import LlamaRerankScorer
+                scorer = LlamaRerankScorer(base_url=args.rerank_url)
+                query = build_query(prefix_user)
+                scored = scorer.score_turns(prefix_long, query, token_counts)
+            else:
+                console.print(f"[red]Unsupported method: {method}[/red]")
+                continue
+
+            result = select_turns(
+                turns=prefix_copy,
+                scored=scored,
+                token_counts=token_counts,
+                budget=args.budget,
+                short_threshold=args.short_threshold,
+            )
+
+            compact_speed_s = _time.monotonic() - t_compact_start
+            kept_tokens = sum(token_counts.get(t.index, 0) for t in result.kept_turns)
+            kept_indices = {t.index for t in result.kept_turns}
+
+            console.print(
+                f"  Compacted to {kept_tokens:,} tokens "
+                f"({len(result.kept_turns)} turns) in {compact_speed_s:.1f}s"
+            )
+
+        except Exception as e:
+            console.print(f"[red]  Compaction error: {e}[/red]")
+            import traceback
+            traceback.print_exc()
+            continue
+
+        # --- Evidence turn coverage (only if probes are available) ---
+        if probe_set is not None:
+            ev_result = compute_evidence_coverage(
+                probe_set=probe_set,
+                kept_turn_indices=kept_indices,
+                method=method,
+                budget=args.budget,
+            )
+            ev_result.speed_s = compact_speed_s
+            ev_result.kept_tokens = kept_tokens
+            ev_result.total_tokens = total_prefix_tokens
+            evidence_results.append(ev_result)
+
+        # --- Entity coverage ---
+        kept_texts = [extract_text(t) for t in result.kept_turns]
+        kept_entities = extract_entities("\n".join(kept_texts))
+        cov, wcov, type_breakdown = compute_coverage(suffix_entities, kept_entities)
+
+        ent_result = EntityCoverageResult(
+            method=method,
+            budget=args.budget,
+            speed_s=compact_speed_s,
+            coverage=cov,
+            weighted_coverage=wcov,
+            type_coverage=type_breakdown,
+            total_tokens=total_prefix_tokens,
+            kept_tokens=kept_tokens,
+            compression=kept_tokens / total_prefix_tokens if total_prefix_tokens > 0 else 0,
+            suffix_entity_count=suffix_entities.total_count,
+            prefix_entity_count=kept_entities.total_count,
+            covered_count=len(suffix_entities.all_entities() & kept_entities.all_entities()),
+        )
+        entity_results.append(ent_result)
+
+    if not evidence_results and not entity_results:
+        console.print("[red]No results.[/red]")
+        return 1
+
+    # --- 4. Display evidence coverage results ---
+    if not evidence_results:
+        console.print("\n[dim]Evidence coverage: skipped (no probes)[/dim]")
+
+    if evidence_results:
+        table = Table(title="\nEvidence Turn Coverage", show_header=True, header_style="bold")
+        table.add_column("Metric", style="bold")
+        for r in evidence_results:
+            table.add_column(f"{r.method}\n({r.budget:,} budget)", justify="right")
+
+        # Dimension rows
+        from lib.eval.probes import DIMENSIONS
+        for dim_name, dim_weight in DIMENSIONS.items():
+            label = f"{dim_name} (w={dim_weight:.2f})"
+            values = []
+            for r in evidence_results:
+                dm = r.dimension_map
+                d = dm.get(dim_name)
+                if d and d.probe_count > 0:
+                    values.append(f"{d.mean_coverage:.3f}  ({d.probe_count}p)")
+                else:
+                    values.append("—")
+            table.add_row(label, *values)
+
+        table.add_row("─" * 24, *["─" * 14 for _ in evidence_results])
+
+        table.add_row(
+            "[bold]Composite[/bold]",
+            *[f"[bold]{r.composite:.3f}[/bold]" for r in evidence_results],
+        )
+        table.add_row(
+            "NDCG (difficulty-weighted)",
+            *[f"{r.ndcg:.3f}" for r in evidence_results],
+        )
+        table.add_row(
+            "Speed (s)",
+            *[f"{r.speed_s:.2f}" for r in evidence_results],
+        )
+        table.add_row(
+            "Tokens (kept / total)",
+            *[f"{r.kept_tokens:,} / {r.total_tokens:,}" for r in evidence_results],
+        )
+
+        console.print(table)
+
+    # --- Entity coverage table ---
+    if entity_results:
+        ent_table = Table(title="\nEntity Preservation", show_header=True, header_style="bold")
+        ent_table.add_column("Metric", style="bold")
+        for r in entity_results:
+            ent_table.add_column(f"{r.method}\n({r.budget:,} budget)", justify="right")
+
+        # Per-type rows
+        all_types = sorted(
+            {t for r in entity_results for t in r.type_coverage},
+            key=lambda t: ENTITY_TYPES.get(t, 0),
+            reverse=True,
+        )
+        for etype in all_types:
+            label = f"{etype} (w={ENTITY_TYPES.get(etype, 0):.1f})"
+            values = []
+            for r in entity_results:
+                tc = r.type_coverage.get(etype)
+                if tc:
+                    values.append(f"{tc['coverage']:.3f}  ({tc['covered']}/{tc['total']})")
+                else:
+                    values.append("—")
+            ent_table.add_row(label, *values)
+
+        ent_table.add_row("─" * 24, *["─" * 18 for _ in entity_results])
+
+        ent_table.add_row(
+            "[bold]Coverage (unweighted)[/bold]",
+            *[f"{r.coverage:.3f}" for r in entity_results],
+        )
+        ent_table.add_row(
+            "[bold]Coverage (weighted)[/bold]",
+            *[f"[bold]{r.weighted_coverage:.3f}[/bold]" for r in entity_results],
+        )
+        ent_table.add_row(
+            "Suffix entities",
+            *[f"{r.suffix_entity_count}" for r in entity_results],
+        )
+        ent_table.add_row(
+            "Covered entities",
+            *[f"{r.covered_count}" for r in entity_results],
+        )
+
+        console.print(ent_table)
+
+    # --- 5. Show dropped evidence detail ---
+    if args.verbose and evidence_results:
+        for r in evidence_results:
+            dropped = [p for p in r.probe_details if p.coverage < 1.0]
+            if dropped:
+                console.print(f"\n  [yellow]{r.method}[/yellow] — dropped evidence:")
+                for p in dropped:
+                    console.print(
+                        f"    {p.probe_id} ({p.dimension}, {p.difficulty}): "
+                        f"coverage={p.coverage:.2f}  "
+                        f"kept={p.kept_evidence}  dropped={p.dropped_evidence}"
+                    )
+
+    # --- 6. Export JSON ---
+    if args.eval_output:
+        data = []
+        if evidence_results:
+            for i, ev in enumerate(evidence_results):
+                entry = ev.to_dict()
+                if i < len(entity_results):
+                    entry["entity_coverage"] = entity_results[i].to_dict()
+                data.append(entry)
+        else:
+            # Entity-only mode (no probes available)
+            for ent in entity_results:
+                data.append(ent.to_dict())
+        args.eval_output.write_text(json.dumps(data, indent=2))
+        console.print(f"\nResults exported to {args.eval_output}")
+
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Compact Claude Code conversation histories."
@@ -275,8 +565,9 @@ def main() -> int:
     parser.add_argument("--rerank-url", type=str, default="http://localhost:8181", help="llama.cpp reranker server URL (default: http://localhost:8181)")
     parser.add_argument("--evaluate", action="store_true", help="Run fitness evaluation (split conversation, measure recall)")
     parser.add_argument("--evaluate-llm", action="store_true", help="Run LLM-as-Judge evaluation (comprehension probes)")
+    parser.add_argument("--evaluate-v2", action="store_true", help="Run v2 evaluation: evidence coverage + entity coverage (no LLM calls)")
     parser.add_argument("--split-ratio", type=float, default=0.70, help="Prefix/suffix split for evaluation (default: 0.70)")
-    parser.add_argument("--judge-model", type=str, default="anthropic/claude-opus-4-5", help="Model for probe generation and judging (default: anthropic/claude-opus-4-5)")
+    parser.add_argument("--judge-model", type=str, default="stepfun/step-3.5-flash:free", help="Model for probe generation and judging (default: stepfun/step-3.5-flash:free)")
     parser.add_argument("--probe-cache", type=Path, default=Path("eval_cache"), help="Directory for cached probe sets (default: eval_cache)")
     parser.add_argument("--regenerate-probes", action="store_true", help="Force regeneration of probes even if cached")
     parser.add_argument("--eval-output", type=Path, default=None, help="Export LLM eval results as JSON")
@@ -299,6 +590,8 @@ def main() -> int:
     console.print(f"  {len(turns)} turns total: {len(user_turns)} user, {len(system_turns)} system")
 
     # --- Evaluation modes ---
+    if args.evaluate_v2:
+        return _run_evaluate_v2(args, turns)
     if args.evaluate_llm:
         return _run_evaluate_llm(args, turns)
     if args.evaluate:
