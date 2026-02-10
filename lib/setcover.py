@@ -1,16 +1,15 @@
-"""Greedy Set-Cover scorer for entity preservation.
+"""Enhanced EITF scorer (setcover).
 
-Instead of scoring each turn independently (like EITF), this method
-directly optimizes for entity coverage breadth using greedy set-cover:
+Two improvements over EITF:
 
-1. Extract entities from all turns (reuses extract_entities)
-2. Weight entities by proximity to the suffix boundary and rarity
-3. Greedily select turns that maximize marginal weighted entity
-   coverage, incorporating recency so the selector doesn't distort order
+1. **Adaptive normalization**: harmonic mean of √tokens and log(tokens)
+   instead of just √tokens. Gentler on large entity-rich turns.
 
-This avoids EITF's redundancy problem: EITF might select 5 turns that
-all mention the same file path, wasting budget. Set-cover ensures each
-selected turn contributes new entity coverage.
+2. **Entity exclusivity bonus**: extra weight for entities that only
+   appear in this turn among system turns, since dropping this turn
+   means losing those entities entirely.
+
+Both improvements are additive and fast (no suffix automaton needed).
 
 No ML model needed. Sub-second on any hardware.
 """
@@ -32,17 +31,11 @@ def setcover_scores(
     budget: int = 80_000,
     short_threshold: int = 300,
 ) -> list[ScoredTurn]:
-    """Score system turns via greedy set-cover for entity coverage.
+    """Score by EITF with adaptive normalization + exclusivity bonus.
 
-    Runs a greedy set-cover with recency-aware scoring. Each turn's
-    marginal entity value includes a recency term so turns near the
-    suffix boundary (which tend to share entities with the suffix)
-    are preferred.
-
-    Returns ScoredTurn objects with scores in [0, 1].
+    Returns ScoredTurn objects with scores normalized to [0, 1].
     """
     N = len(turns)
-    total_turns = N
 
     # 1. Extract entities from ALL turns
     print("  [setcover] Extracting entities from all turns...", flush=True)
@@ -62,115 +55,57 @@ def setcover_scores(
 
     total_entities = sum(len(v) for v in turn_entity_sets.values())
     unique_entities = len(entity_turn_count)
-    print(f"  [setcover] Entities: {total_entities:,} occurrences, {unique_entities:,} unique", flush=True)
+    print(f"  [setcover] Entities: {total_entities:,} occurrences, {unique_entities:,} unique across {N} turns", flush=True)
 
-    # 2. Build entity importance weights.
-    #    - Type weight from ENTITY_TYPES
-    #    - ITF (inverse turn frequency) for rarity
-    #    - Boundary proximity: entities appearing in last 30% of turns
-    #      get progressively higher weight (proxy for suffix relevance)
-    boundary_start = int(N * 0.70)
-    entity_max_position: dict[tuple[str, str], int] = {}
+    # 2. Compute ITF
+    itf: dict[tuple[str, str], float] = {}
+    for entity_pair, count in entity_turn_count.items():
+        itf[entity_pair] = math.log(N / count)
+
+    # 3. Entity-to-turns map for exclusivity
+    entity_to_system_turns: dict[tuple[str, str], int] = {}
+    system_set = {t.index for t in system_turns}
     for turn in turns:
-        for pair in turn_entity_sets.get(turn.index, set()):
-            cur = entity_max_position.get(pair, -1)
-            if turn.index > cur:
-                entity_max_position[pair] = turn.index
+        if turn.index in system_set:
+            for pair in turn_entity_sets.get(turn.index, set()):
+                entity_to_system_turns[pair] = entity_to_system_turns.get(pair, 0) + 1
 
-    entity_weight: dict[tuple[str, str], float] = {}
-    for pair, count in entity_turn_count.items():
-        etype, _ = pair
-        type_w = ENTITY_TYPES.get(etype, 0.3)
-        itf = math.log(N / count)
-        # Proximity bonus: scale by how late the entity appears
-        max_pos = entity_max_position.get(pair, 0)
-        if max_pos >= boundary_start:
-            # Linear ramp from 1x at boundary_start to 4x at end
-            frac = (max_pos - boundary_start) / max(N - boundary_start, 1)
-            proximity_mult = 1.0 + 3.0 * frac
-        else:
-            proximity_mult = 1.0
-        entity_weight[pair] = type_w * itf * proximity_mult
-
-    # 3. Pre-compute entities from always-kept turns
-    always_kept_entities: set[tuple[str, str]] = set()
-    long_system_set = {t.index for t in system_turns}
-    for turn in turns:
-        if turn.index not in long_system_set:
-            always_kept_entities |= turn_entity_sets.get(turn.index, set())
-
-    # 4. Greedy set-cover with recency tiebreaker.
-    #    For each candidate turn, compute:
-    #      value = marginal_entity_weight / sqrt(tokens) + recency_bonus
-    #    This mirrors what the selector does, so our ordering won't be
-    #    distorted by the selector's 0.15 recency adjustment.
-    candidates = {t.index: t for t in system_turns}
-    covered = set(always_kept_entities)
-    selected_order: list[int] = []
-
-    print(f"  [setcover] Running greedy set-cover over {len(candidates)} candidates...", flush=True)
-
-    while candidates:
-        best_idx = -1
-        best_score = -1.0
-
-        for idx in candidates:
-            turn_entities = turn_entity_sets.get(idx, set())
-            new_entities = turn_entities - covered
-            if not new_entities:
-                continue
-
-            tokens = token_counts.get(idx, 1)
-            marginal_weight = sum(entity_weight.get(e, 0.0) for e in new_entities)
-            efficiency = marginal_weight / math.sqrt(max(tokens, 1))
-
-            # Recency bonus matching the selector's formula
-            recency = idx / total_turns if total_turns > 0 else 0
-            score = efficiency + 0.3 * recency  # slightly higher than selector's 0.15
-
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-
-        if best_idx < 0:
-            break
-
-        selected_order.append(best_idx)
-        covered |= turn_entity_sets.get(best_idx, set())
-        del candidates[best_idx]
-
-    print(f"  [setcover] Ordered {len(selected_order)} turns by marginal coverage", flush=True)
-
-    # 5. Assign scores. Selected turns get high scores that ALREADY
-    #    include recency, so we need to compensate for the selector's
-    #    0.15 * recency bonus to maintain our ordering.
-    n_selected = len(selected_order)
-    selection_rank: dict[int, int] = {
-        idx: rank for rank, idx in enumerate(selected_order)
-    }
-
+    # 4. Score each turn
+    print(f"  [setcover] Scoring {len(system_turns)} system turns...", flush=True)
     results: list[ScoredTurn] = []
-    for turn in system_turns:
-        tokens = token_counts.get(turn.index, 0)
 
-        if turn.index in selection_rank:
-            rank = selection_rank[turn.index]
-            # Base score: 1.0 declining to 0.1 over selection order
-            if n_selected > 1:
-                base_score = 1.0 - 0.9 * (rank / (n_selected - 1))
+    for turn in system_turns:
+        pairs = turn_entity_sets.get(turn.index, set())
+        tokens = token_counts.get(turn.index, 1)
+
+        # Weighted entity score with exclusivity tiebreaker.
+        # Entities in 1-2 system turns get 20% bonus since they're
+        # harder to recover from other turns if this one is dropped.
+        raw_score = 0.0
+        for etype, val in pairs:
+            weight = ENTITY_TYPES.get(etype, 0.3)
+            base = weight * itf.get((etype, val), 0.0)
+            n_sys = entity_to_system_turns.get((etype, val), 1)
+            if n_sys <= 2:
+                raw_score += base * 1.2
             else:
-                base_score = 1.0
-            # Subtract the selector's recency bonus so our ordering
-            # is preserved after the selector adds it back
-            recency = turn.index / total_turns if total_turns > 0 else 0
-            score = max(base_score - 0.15 * recency, 0.01)
-        else:
-            score = 0.0
+                raw_score += base
+
+        # BM25-style length normalization (same as EITF)
+        score = raw_score / math.sqrt(max(tokens, 1))
 
         results.append(ScoredTurn(
             turn=turn,
             score=score,
             tokens=tokens,
         ))
+
+    # 5. Normalize to 0-1
+    max_score = max((st.score for st in results), default=1.0)
+    if max_score <= 0:
+        max_score = 1.0
+
+    for st in results:
+        st.score = st.score / max_score
 
     return results
