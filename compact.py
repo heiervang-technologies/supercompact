@@ -40,7 +40,7 @@ def _run_evaluate(args: argparse.Namespace, turns: list) -> int:
     """Run fitness evaluation: benchmark method(s) on a split conversation."""
     from lib.fitness import evaluate, FitnessResult
 
-    all_methods = ["dedup", "eitf", "embed", "llama-embed", "llama-rerank"]
+    all_methods = ["dedup", "eitf", "setcover", "embed", "llama-embed", "llama-rerank"]
     methods = [args.method] if args.method != "all" else all_methods
     results: list[FitnessResult] = []
 
@@ -287,7 +287,7 @@ def _run_evaluate_v2(args: argparse.Namespace, turns: list) -> int:
     )
 
     cache_dir = args.probe_cache
-    all_methods = ["dedup", "llama-embed", "llama-rerank"]
+    all_methods = ["dedup", "eitf", "setcover", "llama-embed", "llama-rerank"]
     methods = [args.method] if args.method != "all" else all_methods
 
     # --- 1. Split conversation ---
@@ -391,6 +391,11 @@ def _run_evaluate_v2(args: argparse.Namespace, turns: list) -> int:
             elif method == "eitf":
                 from lib.eitf import eitf_scores
                 scored = eitf_scores(prefix_copy, prefix_long, token_counts)
+            elif method == "setcover":
+                from lib.setcover import setcover_scores
+                scored = setcover_scores(prefix_copy, prefix_long, token_counts,
+                                          budget=args.budget,
+                                          short_threshold=args.short_threshold)
             elif method == "llama-embed":
                 from lib.llama_embed import LlamaEmbedScorer
                 scorer = LlamaEmbedScorer(base_url=args.embed_url)
@@ -594,7 +599,7 @@ def main() -> int:
         description="Compact Claude Code conversation histories."
     )
     parser.add_argument("jsonl_file", type=Path, help="Path to the JSONL conversation file")
-    parser.add_argument("--method", choices=["embed", "dedup", "eitf", "llama-embed", "llama-rerank", "claude-code", "all"], default="embed", help="Scoring method (default: embed, 'all' for evaluate mode)")
+    parser.add_argument("--method", choices=["embed", "dedup", "eitf", "setcover", "llama-embed", "llama-rerank", "claude-code", "all"], default="embed", help="Scoring method (default: embed, 'all' for evaluate mode)")
     parser.add_argument("--budget", type=int, default=3_000, help="Target token budget (default: 3000)")
     parser.add_argument("--short-threshold", type=int, default=300, help="System turns <= this many tokens are always kept (default: 300)")
     parser.add_argument("--device", type=str, default="cpu", help="PyTorch device for embed method (default: cpu)")
@@ -686,6 +691,13 @@ def main() -> int:
         console.print("EITF scoring (entity-frequency inverse turn frequency)...")
         from lib.eitf import eitf_scores
         scored = eitf_scores(turns, long_system, token_counts)
+
+    elif args.method == "setcover":
+        console.print("Set-cover scoring (greedy entity coverage)...")
+        from lib.setcover import setcover_scores
+        scored = setcover_scores(turns, long_system, token_counts,
+                                  budget=args.budget,
+                                  short_threshold=args.short_threshold)
 
     elif args.method == "embed":
         console.print(f"Loading embedding model on {args.device}...")

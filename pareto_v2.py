@@ -14,8 +14,10 @@ import matplotlib.pyplot as plt
 
 METHOD_STYLES = {
     "dedup":        {"color": "#e74c3c", "marker": "s",  "label": "Dedup"},
-    "llama-embed":  {"color": "#3498db", "marker": "D",  "label": "Llama-embed"},
-    "llama-rerank": {"color": "#2ecc71", "marker": "^",  "label": "Llama-rerank"},
+    "eitf":         {"color": "#2ecc71", "marker": "^",  "label": "EITF"},
+    "setcover":     {"color": "#9b59b6", "marker": "D",  "label": "SetCover"},
+    "llama-embed":  {"color": "#3498db", "marker": "v",  "label": "Llama-embed"},
+    "llama-rerank": {"color": "#1abc9c", "marker": "p",  "label": "Llama-rerank"},
     "claude-code":  {"color": "#f39c12", "marker": "*",  "label": "Claude Code /compact"},
 }
 
@@ -76,7 +78,7 @@ def plot_entity_coverage(ax, results, show_legend=True):
     ax.set_ylabel("Entity Coverage (weighted)  \u2192  higher is better", fontsize=11)
     ax.set_title(
         "Entity Preservation: Speed vs Coverage\n"
-        "Dedup method, 40K\u2013200K budgets, 682K token conversation",
+        "40K\u2013200K budgets, 682K token conversation",
         fontsize=13, fontweight="bold", color="#e6edf3",
     )
 
