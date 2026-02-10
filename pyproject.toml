@@ -1,7 +1,7 @@
 [project]
-name = "compact-poc"
-version = "0.1.0"
-description = "Reranker-based conversation compaction for Claude Code JSONL histories"
+name = "supercompact"
+version = "0.2.0"
+description = "Conversation compaction for Claude Code JSONL histories"
 requires-python = ">=3.11"
 dependencies = [
     "rich",
@@ -11,6 +11,9 @@ dependencies = [
     "transformers>=5.0.0",
     "anthropic>=0.40",
 ]
+
+[project.scripts]
+supercompact = "compact:main"
 
 [project.optional-dependencies]
 torch = [

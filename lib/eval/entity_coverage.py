@@ -350,9 +350,8 @@ def evaluate(
     in the kept prefix turns.
     """
     import time
-    from ..parser import Turn, extract_text
+    from ..parser import extract_text
     from ..tokenizer import turn_tokens
-    from ..types import ScoredTurn, build_query
     from ..selector import select_turns
 
     # --- 1. Split into prefix and suffix ---
@@ -389,6 +388,8 @@ def evaluate(
     total_prefix_tokens = sum(token_counts.values())
 
     # --- 4. Run compaction ---
+    from ..scorer_base import get_scorer
+
     prefix_system = [t for t in prefix_turns if t.kind == "system"]
     prefix_long = [
         t for t in prefix_system
@@ -397,38 +398,17 @@ def evaluate(
 
     t_start = time.monotonic()
 
-    scored: list[ScoredTurn]
-
-    if method == "dedup":
-        from ..dedup import dedup_scores
-        scored = dedup_scores(
-            prefix_turns, prefix_long, token_counts,
-            min_repeat_len=min_repeat_len,
-        )
-    elif method == "embed":
-        from ..scorer import Scorer
-        user_turns = [t for t in prefix_turns if t.kind == "user"]
-        scorer = Scorer(device=device)
-        query = build_query(user_turns)
-        scored = scorer.score_turns(
-            prefix_long, query, token_counts, batch_size=batch_size,
-        )
-    elif method == "llama-embed":
-        from ..llama_embed import LlamaEmbedScorer
-        user_turns = [t for t in prefix_turns if t.kind == "user"]
-        scorer = LlamaEmbedScorer(base_url=embed_url)
-        query = build_query(user_turns)
-        scored = scorer.score_turns(
-            prefix_long, query, token_counts, batch_size=batch_size,
-        )
-    elif method == "llama-rerank":
-        from ..llama_rerank import LlamaRerankScorer
-        user_turns = [t for t in prefix_turns if t.kind == "user"]
-        scorer = LlamaRerankScorer(base_url=rerank_url)
-        query = build_query(user_turns)
-        scored = scorer.score_turns(prefix_long, query, token_counts)
-    else:
-        raise ValueError(f"Unknown method: {method}")
+    scorer = get_scorer(method)
+    scored = scorer.score(
+        prefix_turns, prefix_long, token_counts,
+        min_repeat_len=min_repeat_len,
+        budget=budget,
+        short_threshold=short_threshold,
+        device=device,
+        batch_size=batch_size,
+        embed_url=embed_url,
+        rerank_url=rerank_url,
+    )
 
     result = select_turns(
         turns=prefix_turns,

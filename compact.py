@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 """Conversation compaction for Claude Code JSONL histories.
 
+Subcommands:
+  compact   — Score and select turns to fit a token budget (default)
+  evaluate  — Entity preservation evaluation across methods/budgets
+  plot      — Generate Pareto plots from evaluation results
+
 Methods:
-  embed        — Qwen3-Embedding-0.6B cosine similarity (needs GPU/CPU + torch)
   dedup        — Suffix automaton dedup, unique content ratio (no model, instant)
+  eitf         — Entity-frequency inverse turn frequency (no model, instant)
+  setcover     — Greedy entity coverage with forward-reference weighting (instant)
+  embed        — Qwen3-Embedding-0.6B cosine similarity (needs GPU/CPU + torch)
   llama-embed  — Qwen3-Embedding-0.6B via llama.cpp server (HTTP, no torch)
   llama-rerank — Qwen3-Reranker-0.6B via llama.cpp server (HTTP, no torch)
 
 Usage:
-    uv run compact.py JSONL_FILE --method embed [--budget 80000] [--device cuda:0]
-    uv run compact.py JSONL_FILE --method dedup [--budget 80000] [--min-repeat-len 64]
-    uv run compact.py JSONL_FILE --method llama-embed --embed-url http://localhost:8080
-    uv run compact.py JSONL_FILE --method llama-rerank --rerank-url http://localhost:8181
-    uv run compact.py JSONL_FILE --evaluate [--budget 80000]       # fitness benchmark
-    uv run compact.py JSONL_FILE --evaluate-llm --method all --budget 3000  # LLM-as-Judge
-    uv run compact.py JSONL_FILE --evaluate-v2 --method all --budget 3000   # v2 metrics
+    uv run compact.py JSONL_FILE --method eitf [--budget 80000]
+    uv run compact.py evaluate JSONL_FILE --method all --budget 100000
+    uv run compact.py plot eval_results.json -o pareto.png
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -32,616 +36,24 @@ from lib.tokenizer import turn_tokens, estimate_tokens
 from lib.types import ScoredTurn, build_query, random_scores
 from lib.selector import select_turns
 from lib.formatter import print_stats, write_compacted_jsonl, write_scores_csv
+from lib.scorer_base import SCORERS, LOCAL_METHODS, ALL_METHODS, get_scorer
 
 console = Console()
 
 
-def _run_evaluate(args: argparse.Namespace, turns: list) -> int:
-    """Run fitness evaluation: benchmark method(s) on a split conversation."""
-    from lib.fitness import evaluate, FitnessResult
+# ---------------------------------------------------------------------------
+# Compact subcommand (default)
+# ---------------------------------------------------------------------------
 
-    all_methods = ["dedup", "eitf", "setcover", "embed", "llama-embed", "llama-rerank"]
-    methods = [args.method] if args.method != "all" else all_methods
-    results: list[FitnessResult] = []
-
-    for method in methods:
-        console.print(f"\n[bold]Evaluating: {method}[/bold]")
-        try:
-            fr = evaluate(
-                turns=turns,
-                method=method,
-                budget=args.budget,
-                split_ratio=args.split_ratio,
-                short_threshold=args.short_threshold,
-                min_repeat_len=args.min_repeat_len,
-                device=args.device,
-                batch_size=args.batch_size,
-                embed_url=args.embed_url,
-                rerank_url=args.rerank_url,
-            )
-            results.append(fr)
-        except Exception as e:
-            console.print(f"[red]  Error: {e}[/red]")
-            continue
-
-    if not results:
-        console.print("[red]No results.[/red]")
+def cmd_compact(args: argparse.Namespace) -> int:
+    """Score and select turns to fit within a token budget."""
+    turns = _parse_file(args.jsonl_file)
+    if turns is None:
         return 1
-
-    # Display results
-    table = Table(title="\nFitness Evaluation", show_header=True)
-    table.add_column("Metric", style="bold")
-    for r in results:
-        table.add_column(r.method, justify="right")
-
-    rows = [
-        ("Recall", [f"{r.recall:.4f}" for r in results]),
-        ("Speed (s)", [f"{r.speed_s:.2f}" for r in results]),
-        ("Compression", [f"{r.compression:.3f}" for r in results]),
-        ("F1 (recall vs compression)", [f"{r.f1:.4f}" for r in results]),
-        ("Budget", [f"{r.budget:,}" for r in results]),
-        ("Prefix tokens", [f"{r.total_tokens:,}" for r in results]),
-        ("Kept tokens", [f"{r.kept_tokens:,}" for r in results]),
-        ("Prefix / suffix turns", [f"{r.prefix_turns} / {r.suffix_turns}" for r in results]),
-        ("Suffix vocab size", [f"{r.suffix_vocab_size:,}" for r in results]),
-        ("Scored turns", [f"{r.scored_count}" for r in results]),
-        ("Kept / dropped scored", [f"{r.kept_scored} / {r.dropped_scored}" for r in results]),
-    ]
-
-    for label, values in rows:
-        table.add_row(label, *values)
-
-    console.print(table)
-
-    # Highlight winner
-    if len(results) == 2:
-        a, b = results
-        recall_winner = a.method if a.recall >= b.recall else b.method
-        speed_winner = a.method if a.speed_s <= b.speed_s else b.method
-        f1_winner = a.method if a.f1 >= b.f1 else b.method
-
-        console.print(f"\n  Recall winner:  {recall_winner}")
-        console.print(f"  Speed winner:   {speed_winner}")
-        console.print(f"  F1 winner:      {f1_winner}")
-
-    return 0
-
-
-def _run_evaluate_llm(args: argparse.Namespace, turns: list) -> int:
-    """Run LLM-as-Judge evaluation: probe generation, answer gen, scoring."""
-    import time as _time
-    from lib.eval.probes import generate_probes, ProbeSet
-    from lib.eval.cache import conv_hash, load_probes, save_probes, DEFAULT_CACHE_DIR
-    from lib.eval.judge import generate_answers, score_answers, ANSWER_MODELS
-    from lib.eval.aggregate import aggregate
-    from lib.eval.report import print_results, export_json, export_trace
-
-    cache_dir = args.probe_cache
-    all_methods = ["dedup", "eitf", "llama-embed", "llama-rerank"]
-    methods = [args.method] if args.method != "all" else all_methods
-
-    # --- 1. Split conversation ---
-    split_idx = int(len(turns) * args.split_ratio)
-    while split_idx < len(turns) and turns[split_idx].kind != "user":
-        split_idx += 1
-
-    prefix_turns = turns[:split_idx]
-    suffix_turns = turns[split_idx:]
-
-    if not prefix_turns or not suffix_turns:
-        console.print("[red]Split produced empty prefix or suffix.[/red]")
-        return 1
-
-    console.print(f"Split: {len(prefix_turns)} prefix / {len(suffix_turns)} suffix turns")
-
-    # --- 2. Get or generate probes ---
-    key = conv_hash(args.jsonl_file, args.split_ratio)
-    probe_set = None
-
-    if not args.regenerate_probes:
-        probe_set = load_probes(cache_dir, key)
-        if probe_set:
-            console.print(f"Loaded {len(probe_set.probes)} cached probes")
-
-    if probe_set is None:
-        console.print("Generating probes via Claude API...")
-        probe_set = generate_probes(
-            prefix_turns=prefix_turns,
-            suffix_turns=suffix_turns,
-            split_idx=split_idx,
-            conv_hash=key,
-            split_ratio=args.split_ratio,
-            model=args.judge_model,
-        )
-        path = save_probes(cache_dir, probe_set)
-        console.print(f"Generated {len(probe_set.probes)} probes, cached to {path}")
-
-    # --- 3. For each method: compact, generate answers, score ---
-    all_results = []
-    _seen_hashes: dict[str, str] = {}  # text_hash -> method name (skip identical output)
-
-    for method_idx, method in enumerate(methods):
-        if method_idx > 0:
-            console.print("  [dim]Pausing 5s between methods (rate limits)...[/dim]")
-            _time.sleep(5)
-        console.print(f"\n[bold]{'='*50}[/bold]")
-        console.print(f"[bold]Evaluating: {method} (budget={args.budget:,})[/bold]")
-
-        # Run compaction to get the compacted context
-        try:
-            # Re-index prefix turns for the fitness evaluator
-            prefix_copy = [t for t in prefix_turns]
-            for i, t in enumerate(prefix_copy):
-                t.index = i
-
-            token_counts: dict[int, int] = {}
-            for t in prefix_copy:
-                token_counts[t.index] = turn_tokens(t)
-
-            total_prefix_tokens = sum(token_counts.values())
-            prefix_system = [t for t in prefix_copy if t.kind == "system"]
-            prefix_long = [t for t in prefix_system
-                           if token_counts.get(t.index, 0) > args.short_threshold]
-            prefix_user = [t for t in prefix_copy if t.kind == "user"]
-
-            # Score turns using the compaction method (timed)
-            scored: list[ScoredTurn]
-            t_compact_start = _time.monotonic()
-
-            if method == "dedup":
-                from lib.dedup import dedup_scores
-                scored = dedup_scores(prefix_copy, prefix_long, token_counts,
-                                      min_repeat_len=args.min_repeat_len)
-            elif method == "llama-embed":
-                from lib.llama_embed import LlamaEmbedScorer
-                scorer = LlamaEmbedScorer(base_url=args.embed_url)
-                query = build_query(prefix_user)
-                scored = scorer.score_turns(prefix_long, query, token_counts,
-                                            batch_size=args.batch_size)
-            elif method == "llama-rerank":
-                from lib.llama_rerank import LlamaRerankScorer
-                scorer = LlamaRerankScorer(base_url=args.rerank_url)
-                query = build_query(prefix_user)
-                scored = scorer.score_turns(prefix_long, query, token_counts)
-            else:
-                console.print(f"[red]Unsupported method for LLM eval: {method}[/red]")
-                continue
-
-            result = select_turns(
-                turns=prefix_copy,
-                scored=scored,
-                token_counts=token_counts,
-                budget=args.budget,
-                short_threshold=args.short_threshold,
-            )
-
-            compact_speed_s = _time.monotonic() - t_compact_start
-
-            # Build compacted context string
-            compacted_text = "\n\n".join(extract_text(t) for t in result.kept_turns)
-            kept_tokens = sum(token_counts.get(t.index, 0) for t in result.kept_turns)
-            console.print(f"  Compacted to {kept_tokens:,} tokens ({len(result.kept_turns)} turns) in {compact_speed_s:.1f}s")
-
-        except Exception as e:
-            console.print(f"[red]  Compaction error: {e}[/red]")
-            import traceback
-            traceback.print_exc()
-            continue
-
-        # Skip if compacted text is identical to a previous method
-        import hashlib
-        text_hash = hashlib.sha256(compacted_text.encode()).hexdigest()[:16]
-        if text_hash in _seen_hashes:
-            prev_method = _seen_hashes[text_hash]
-            console.print(f"  [yellow]Identical output to {prev_method} — reusing scores[/yellow]")
-            prev = [r for r in all_results if r.method == prev_method]
-            for pr in prev:
-                from copy import deepcopy
-                clone = deepcopy(pr)
-                clone.method = method
-                clone.speed_s = compact_speed_s
-                all_results.append(clone)
-            continue
-        _seen_hashes[text_hash] = method
-
-        # Generate answers
-        console.print("  Generating answers...")
-        answers = generate_answers(compacted_text, probe_set)
-
-        # Score answers
-        console.print("  Scoring answers...")
-        score_answers(answers, probe_set, judge_model=args.judge_model)
-
-        # Aggregate
-        method_results = aggregate(answers, probe_set, method, args.budget)
-        for mr in method_results:
-            mr.speed_s = compact_speed_s
-            mr.kept_tokens = kept_tokens
-            mr.total_tokens = total_prefix_tokens
-        all_results.extend(method_results)
-
-        # Export trace (prompts + answers + scores)
-        export_trace(method, args.budget, probe_set, answers, cache_dir)
-
-    if not all_results:
-        console.print("[red]No results.[/red]")
-        return 1
-
-    # --- 4. Display and export ---
-    print_results(all_results)
-
-    if args.eval_output:
-        export_json(all_results, args.eval_output)
-
-    return 0
-
-
-def _run_evaluate_v2(args: argparse.Namespace, turns: list) -> int:
-    """Run v2 evaluation: evidence coverage + entity coverage (no LLM calls)."""
-    import json
-    import time as _time
-    from lib.eval.cache import conv_hash, load_probes, DEFAULT_CACHE_DIR
-    from lib.eval.evidence_coverage import compute_evidence_coverage, EvidenceCoverageResult
-    from lib.eval.entity_coverage import (
-        extract_entities, compute_coverage, EntityCoverageResult, ENTITY_TYPES,
-    )
-
-    cache_dir = args.probe_cache
-    all_methods = ["dedup", "eitf", "setcover", "llama-embed", "llama-rerank"]
-    methods = [args.method] if args.method != "all" else all_methods
-
-    # --- 1. Split conversation ---
-    split_idx = int(len(turns) * args.split_ratio)
-    while split_idx < len(turns) and turns[split_idx].kind != "user":
-        split_idx += 1
-
-    prefix_turns = turns[:split_idx]
-    suffix_turns = turns[split_idx:]
-
-    if not prefix_turns or not suffix_turns:
-        console.print("[red]Split produced empty prefix or suffix.[/red]")
-        return 1
-
-    console.print(f"Split: {len(prefix_turns)} prefix / {len(suffix_turns)} suffix turns")
-
-    # --- 2. Load cached probes (optional — evidence coverage needs them) ---
-    key = conv_hash(args.jsonl_file, args.split_ratio)
-    probe_set = load_probes(cache_dir, key)
-
-    if probe_set is not None:
-        console.print(f"Loaded {len(probe_set.probes)} cached probes")
-    else:
-        console.print("[dim]No cached probes found — skipping evidence coverage[/dim]")
-
-    # --- 3. For each method: compact prefix, compute coverage metrics ---
-    evidence_results: list[EvidenceCoverageResult] = []
-    entity_results: list[EntityCoverageResult] = []
-
-    # Extract suffix entities once (shared across methods)
-    suffix_texts = [extract_text(t) for t in suffix_turns if t.kind == "system"]
-    suffix_entities = extract_entities("\n".join(suffix_texts))
-    console.print(f"Extracted {suffix_entities.total_count} entities from suffix")
-
-    for method in methods:
-        console.print(f"\n[bold]{'='*50}[/bold]")
-        console.print(f"[bold]Evaluating: {method} (budget={args.budget:,})[/bold]")
-
-        try:
-            # Re-index prefix turns
-            prefix_copy = [t for t in prefix_turns]
-            for i, t in enumerate(prefix_copy):
-                t.index = i
-
-            token_counts: dict[int, int] = {}
-            for t in prefix_copy:
-                token_counts[t.index] = turn_tokens(t)
-
-            total_prefix_tokens = sum(token_counts.values())
-
-            t_compact_start = _time.monotonic()
-
-            # --- claude-code: LLM summarization (different path) ---
-            if method == "claude-code":
-                from lib.llm_compact import llm_compact, make_synthetic_turn
-
-                console.print("  Calling Claude via OpenRouter for summarization...")
-                summary = llm_compact(prefix_copy, args.budget)
-                compact_speed_s = _time.monotonic() - t_compact_start
-
-                synthetic_turn = make_synthetic_turn(summary)
-                kept_tokens = estimate_tokens(summary)
-                console.print(
-                    f"  Summary: {kept_tokens:,} tokens in {compact_speed_s:.1f}s"
-                )
-
-                # Entity coverage from summary
-                kept_entities = extract_entities(summary)
-                cov, wcov, type_breakdown = compute_coverage(suffix_entities, kept_entities)
-
-                ent_result = EntityCoverageResult(
-                    method=method,
-                    budget=args.budget,
-                    speed_s=compact_speed_s,
-                    coverage=cov,
-                    weighted_coverage=wcov,
-                    type_coverage=type_breakdown,
-                    total_tokens=total_prefix_tokens,
-                    kept_tokens=kept_tokens,
-                    compression=kept_tokens / total_prefix_tokens if total_prefix_tokens > 0 else 0,
-                    suffix_entity_count=suffix_entities.total_count,
-                    prefix_entity_count=kept_entities.total_count,
-                    covered_count=len(suffix_entities.all_entities() & kept_entities.all_entities()),
-                )
-                entity_results.append(ent_result)
-                continue
-
-            # --- Standard score-and-select methods ---
-            prefix_system = [t for t in prefix_copy if t.kind == "system"]
-            prefix_long = [t for t in prefix_system
-                           if token_counts.get(t.index, 0) > args.short_threshold]
-            prefix_user = [t for t in prefix_copy if t.kind == "user"]
-
-            # Score turns
-            scored: list[ScoredTurn]
-
-            if method == "dedup":
-                from lib.dedup import dedup_scores
-                scored = dedup_scores(prefix_copy, prefix_long, token_counts,
-                                      min_repeat_len=args.min_repeat_len)
-            elif method == "eitf":
-                from lib.eitf import eitf_scores
-                scored = eitf_scores(prefix_copy, prefix_long, token_counts)
-            elif method == "setcover":
-                from lib.setcover import setcover_scores
-                scored = setcover_scores(prefix_copy, prefix_long, token_counts,
-                                          budget=args.budget,
-                                          short_threshold=args.short_threshold)
-            elif method == "llama-embed":
-                from lib.llama_embed import LlamaEmbedScorer
-                scorer = LlamaEmbedScorer(base_url=args.embed_url)
-                query = build_query(prefix_user)
-                scored = scorer.score_turns(prefix_long, query, token_counts,
-                                            batch_size=args.batch_size)
-            elif method == "llama-rerank":
-                from lib.llama_rerank import LlamaRerankScorer
-                scorer = LlamaRerankScorer(base_url=args.rerank_url)
-                query = build_query(prefix_user)
-                scored = scorer.score_turns(prefix_long, query, token_counts)
-            else:
-                console.print(f"[red]Unsupported method: {method}[/red]")
-                continue
-
-            result = select_turns(
-                turns=prefix_copy,
-                scored=scored,
-                token_counts=token_counts,
-                budget=args.budget,
-                short_threshold=args.short_threshold,
-            )
-
-            compact_speed_s = _time.monotonic() - t_compact_start
-            kept_tokens = sum(token_counts.get(t.index, 0) for t in result.kept_turns)
-            kept_indices = {t.index for t in result.kept_turns}
-
-            console.print(
-                f"  Compacted to {kept_tokens:,} tokens "
-                f"({len(result.kept_turns)} turns) in {compact_speed_s:.1f}s"
-            )
-
-        except Exception as e:
-            console.print(f"[red]  Compaction error: {e}[/red]")
-            import traceback
-            traceback.print_exc()
-            continue
-
-        # --- Evidence turn coverage (only if probes are available) ---
-        if probe_set is not None:
-            ev_result = compute_evidence_coverage(
-                probe_set=probe_set,
-                kept_turn_indices=kept_indices,
-                method=method,
-                budget=args.budget,
-            )
-            ev_result.speed_s = compact_speed_s
-            ev_result.kept_tokens = kept_tokens
-            ev_result.total_tokens = total_prefix_tokens
-            evidence_results.append(ev_result)
-
-        # --- Entity coverage ---
-        kept_texts = [extract_text(t) for t in result.kept_turns]
-        kept_entities = extract_entities("\n".join(kept_texts))
-        cov, wcov, type_breakdown = compute_coverage(suffix_entities, kept_entities)
-
-        ent_result = EntityCoverageResult(
-            method=method,
-            budget=args.budget,
-            speed_s=compact_speed_s,
-            coverage=cov,
-            weighted_coverage=wcov,
-            type_coverage=type_breakdown,
-            total_tokens=total_prefix_tokens,
-            kept_tokens=kept_tokens,
-            compression=kept_tokens / total_prefix_tokens if total_prefix_tokens > 0 else 0,
-            suffix_entity_count=suffix_entities.total_count,
-            prefix_entity_count=kept_entities.total_count,
-            covered_count=len(suffix_entities.all_entities() & kept_entities.all_entities()),
-        )
-        entity_results.append(ent_result)
-
-    if not evidence_results and not entity_results:
-        console.print("[red]No results.[/red]")
-        return 1
-
-    # --- 4. Display evidence coverage results ---
-    if not evidence_results:
-        console.print("\n[dim]Evidence coverage: skipped (no probes)[/dim]")
-
-    if evidence_results:
-        table = Table(title="\nEvidence Turn Coverage", show_header=True, header_style="bold")
-        table.add_column("Metric", style="bold")
-        for r in evidence_results:
-            table.add_column(f"{r.method}\n({r.budget:,} budget)", justify="right")
-
-        # Dimension rows
-        from lib.eval.probes import DIMENSIONS
-        for dim_name, dim_weight in DIMENSIONS.items():
-            label = f"{dim_name} (w={dim_weight:.2f})"
-            values = []
-            for r in evidence_results:
-                dm = r.dimension_map
-                d = dm.get(dim_name)
-                if d and d.probe_count > 0:
-                    values.append(f"{d.mean_coverage:.3f}  ({d.probe_count}p)")
-                else:
-                    values.append("—")
-            table.add_row(label, *values)
-
-        table.add_row("─" * 24, *["─" * 14 for _ in evidence_results])
-
-        table.add_row(
-            "[bold]Composite[/bold]",
-            *[f"[bold]{r.composite:.3f}[/bold]" for r in evidence_results],
-        )
-        table.add_row(
-            "NDCG (difficulty-weighted)",
-            *[f"{r.ndcg:.3f}" for r in evidence_results],
-        )
-        table.add_row(
-            "Speed (s)",
-            *[f"{r.speed_s:.2f}" for r in evidence_results],
-        )
-        table.add_row(
-            "Tokens (kept / total)",
-            *[f"{r.kept_tokens:,} / {r.total_tokens:,}" for r in evidence_results],
-        )
-
-        console.print(table)
-
-    # --- Entity coverage table ---
-    if entity_results:
-        ent_table = Table(title="\nEntity Preservation", show_header=True, header_style="bold")
-        ent_table.add_column("Metric", style="bold")
-        for r in entity_results:
-            ent_table.add_column(f"{r.method}\n({r.budget:,} budget)", justify="right")
-
-        # Per-type rows
-        all_types = sorted(
-            {t for r in entity_results for t in r.type_coverage},
-            key=lambda t: ENTITY_TYPES.get(t, 0),
-            reverse=True,
-        )
-        for etype in all_types:
-            label = f"{etype} (w={ENTITY_TYPES.get(etype, 0):.1f})"
-            values = []
-            for r in entity_results:
-                tc = r.type_coverage.get(etype)
-                if tc:
-                    values.append(f"{tc['coverage']:.3f}  ({tc['covered']}/{tc['total']})")
-                else:
-                    values.append("—")
-            ent_table.add_row(label, *values)
-
-        ent_table.add_row("─" * 24, *["─" * 18 for _ in entity_results])
-
-        ent_table.add_row(
-            "[bold]Coverage (unweighted)[/bold]",
-            *[f"{r.coverage:.3f}" for r in entity_results],
-        )
-        ent_table.add_row(
-            "[bold]Coverage (weighted)[/bold]",
-            *[f"[bold]{r.weighted_coverage:.3f}[/bold]" for r in entity_results],
-        )
-        ent_table.add_row(
-            "Suffix entities",
-            *[f"{r.suffix_entity_count}" for r in entity_results],
-        )
-        ent_table.add_row(
-            "Covered entities",
-            *[f"{r.covered_count}" for r in entity_results],
-        )
-
-        console.print(ent_table)
-
-    # --- 5. Show dropped evidence detail ---
-    if args.verbose and evidence_results:
-        for r in evidence_results:
-            dropped = [p for p in r.probe_details if p.coverage < 1.0]
-            if dropped:
-                console.print(f"\n  [yellow]{r.method}[/yellow] — dropped evidence:")
-                for p in dropped:
-                    console.print(
-                        f"    {p.probe_id} ({p.dimension}, {p.difficulty}): "
-                        f"coverage={p.coverage:.2f}  "
-                        f"kept={p.kept_evidence}  dropped={p.dropped_evidence}"
-                    )
-
-    # --- 6. Export JSON ---
-    if args.eval_output:
-        data = []
-        if evidence_results:
-            for i, ev in enumerate(evidence_results):
-                entry = ev.to_dict()
-                if i < len(entity_results):
-                    entry["entity_coverage"] = entity_results[i].to_dict()
-                data.append(entry)
-        else:
-            # Entity-only mode (no probes available)
-            for ent in entity_results:
-                data.append(ent.to_dict())
-        args.eval_output.write_text(json.dumps(data, indent=2))
-        console.print(f"\nResults exported to {args.eval_output}")
-
-    return 0
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Compact Claude Code conversation histories."
-    )
-    parser.add_argument("jsonl_file", type=Path, help="Path to the JSONL conversation file")
-    parser.add_argument("--method", choices=["embed", "dedup", "eitf", "setcover", "llama-embed", "llama-rerank", "claude-code", "all"], default="embed", help="Scoring method (default: embed, 'all' for evaluate mode)")
-    parser.add_argument("--budget", type=int, default=3_000, help="Target token budget (default: 3000)")
-    parser.add_argument("--short-threshold", type=int, default=300, help="System turns <= this many tokens are always kept (default: 300)")
-    parser.add_argument("--device", type=str, default="cpu", help="PyTorch device for embed method (default: cpu)")
-    parser.add_argument("--output", type=Path, default=None, help="Write compacted JSONL to this file")
-    parser.add_argument("--scores-file", type=Path, default=None, help="Write scores CSV to this file")
-    parser.add_argument("--batch-size", type=int, default=16, help="Embedding batch size (default: 16)")
-    parser.add_argument("--min-repeat-len", type=int, default=64, help="Min repeated substring length for dedup (default: 64)")
-    parser.add_argument("--embed-url", type=str, default="http://localhost:8080", help="llama.cpp embedding server URL (default: http://localhost:8080)")
-    parser.add_argument("--rerank-url", type=str, default="http://localhost:8181", help="llama.cpp reranker server URL (default: http://localhost:8181)")
-    parser.add_argument("--evaluate", action="store_true", help="Run fitness evaluation (split conversation, measure recall)")
-    parser.add_argument("--evaluate-llm", action="store_true", help="Run LLM-as-Judge evaluation (comprehension probes)")
-    parser.add_argument("--evaluate-v2", action="store_true", help="Run v2 evaluation: evidence coverage + entity coverage (no LLM calls)")
-    parser.add_argument("--split-ratio", type=float, default=0.70, help="Prefix/suffix split for evaluation (default: 0.70)")
-    parser.add_argument("--judge-model", type=str, default="stepfun/step-3.5-flash:free", help="Model for probe generation and judging (default: stepfun/step-3.5-flash:free)")
-    parser.add_argument("--probe-cache", type=Path, default=Path("eval_cache"), help="Directory for cached probe sets (default: eval_cache)")
-    parser.add_argument("--regenerate-probes", action="store_true", help="Force regeneration of probes even if cached")
-    parser.add_argument("--eval-output", type=Path, default=None, help="Export LLM eval results as JSON")
-    parser.add_argument("--dry-run", action="store_true", help="Skip model loading, use random scores")
-    parser.add_argument("--verbose", action="store_true", help="Show detailed score breakdown")
-
-    args = parser.parse_args()
-
-    if not args.jsonl_file.exists():
-        console.print(f"[red]Error: {args.jsonl_file} not found[/red]")
-        return 1
-
-    # Parse
-    console.print(f"Parsing {args.jsonl_file.name}...")
-    turns = parse_jsonl(args.jsonl_file)
 
     user_turns = [t for t in turns if t.kind == "user"]
     system_turns = [t for t in turns if t.kind == "system"]
-
     console.print(f"  {len(turns)} turns total: {len(user_turns)} user, {len(system_turns)} system")
-
-    # --- Evaluation modes ---
-    if args.evaluate_v2:
-        return _run_evaluate_v2(args, turns)
-    if args.evaluate_llm:
-        return _run_evaluate_llm(args, turns)
-    if args.evaluate:
-        return _run_evaluate(args, turns)
 
     t_start = time.monotonic()
 
@@ -659,14 +71,8 @@ def main() -> int:
         return 0
 
     # Identify long system turns that need scoring
-    long_system = [
-        t for t in system_turns
-        if token_counts.get(t.index, 0) > args.short_threshold
-    ]
-    short_system = [
-        t for t in system_turns
-        if token_counts.get(t.index, 0) <= args.short_threshold
-    ]
+    long_system = [t for t in system_turns if token_counts.get(t.index, 0) > args.short_threshold]
+    short_system = [t for t in system_turns if token_counts.get(t.index, 0) <= args.short_threshold]
 
     console.print(f"  {len(short_system)} short system turns (always kept)")
     console.print(f"  {len(long_system)} long system turns (to be scored)")
@@ -676,64 +82,22 @@ def main() -> int:
         return 0
 
     # Score
-    scored: list[ScoredTurn]
-
     if args.dry_run:
         console.print("[yellow]Dry run: using random scores[/yellow]")
         scored = random_scores(long_system, token_counts)
-
-    elif args.method == "dedup":
-        console.print(f"Dedup scoring (min_repeat_len={args.min_repeat_len})...")
-        from lib.dedup import dedup_scores
-        scored = dedup_scores(turns, long_system, token_counts, min_repeat_len=args.min_repeat_len)
-
-    elif args.method == "eitf":
-        console.print("EITF scoring (entity-frequency inverse turn frequency)...")
-        from lib.eitf import eitf_scores
-        scored = eitf_scores(turns, long_system, token_counts)
-
-    elif args.method == "setcover":
-        console.print("Set-cover scoring (greedy entity coverage)...")
-        from lib.setcover import setcover_scores
-        scored = setcover_scores(turns, long_system, token_counts,
-                                  budget=args.budget,
-                                  short_threshold=args.short_threshold)
-
-    elif args.method == "embed":
-        console.print(f"Loading embedding model on {args.device}...")
-        from lib.scorer import Scorer
-        scorer = Scorer(device=args.device)
-
-        query = build_query(user_turns)
-        if args.verbose:
-            console.print(f"  Query ({len(query)} chars): {query[:200]}...")
-
-        console.print(f"Scoring {len(long_system)} turns (batch_size={args.batch_size})...")
-        scored = scorer.score_turns(long_system, query, token_counts, batch_size=args.batch_size)
-
-    elif args.method == "llama-embed":
-        console.print(f"Connecting to llama.cpp embed server at {args.embed_url}...")
-        from lib.llama_embed import LlamaEmbedScorer
-        scorer = LlamaEmbedScorer(base_url=args.embed_url)
-
-        query = build_query(user_turns)
-        if args.verbose:
-            console.print(f"  Query ({len(query)} chars): {query[:200]}...")
-
-        console.print(f"Scoring {len(long_system)} turns (batch_size={args.batch_size})...")
-        scored = scorer.score_turns(long_system, query, token_counts, batch_size=args.batch_size)
-
-    elif args.method == "llama-rerank":
-        console.print(f"Connecting to llama.cpp rerank server at {args.rerank_url}...")
-        from lib.llama_rerank import LlamaRerankScorer
-        scorer = LlamaRerankScorer(base_url=args.rerank_url)
-
-        query = build_query(user_turns)
-        if args.verbose:
-            console.print(f"  Query ({len(query)} chars): {query[:200]}...")
-
-        console.print(f"Reranking {len(long_system)} turns...")
-        scored = scorer.score_turns(long_system, query, token_counts)
+    else:
+        scorer = get_scorer(args.method)
+        console.print(f"Scoring with {scorer.name}...")
+        scored = scorer.score(
+            turns, long_system, token_counts,
+            min_repeat_len=args.min_repeat_len,
+            budget=args.budget,
+            short_threshold=args.short_threshold,
+            device=args.device,
+            batch_size=args.batch_size,
+            embed_url=args.embed_url,
+            rerank_url=args.rerank_url,
+        )
 
     # Select
     result = select_turns(
@@ -758,6 +122,442 @@ def main() -> int:
         write_scores_csv(scored, kept_indices, args.scores_file)
 
     return 0
+
+
+# ---------------------------------------------------------------------------
+# Evaluate subcommand
+# ---------------------------------------------------------------------------
+
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    """Run entity preservation evaluation across methods and budgets."""
+    from lib.eval.entity_coverage import (
+        extract_entities, compute_coverage, EntityCoverageResult, ENTITY_TYPES,
+    )
+    from lib.eval.evidence_coverage import compute_evidence_coverage
+    from lib.eval.cache import conv_hash, load_probes
+
+    turns = _parse_file(args.jsonl_file)
+    if turns is None:
+        return 1
+
+    methods = _resolve_methods(args.method)
+
+    # Split conversation
+    split_idx = int(len(turns) * args.split_ratio)
+    while split_idx < len(turns) and turns[split_idx].kind != "user":
+        split_idx += 1
+
+    prefix_turns = turns[:split_idx]
+    suffix_turns = turns[split_idx:]
+
+    if not prefix_turns or not suffix_turns:
+        console.print("[red]Split produced empty prefix or suffix.[/red]")
+        return 1
+
+    console.print(f"Split: {len(prefix_turns)} prefix / {len(suffix_turns)} suffix turns")
+
+    # Load cached probes (optional — evidence coverage needs them)
+    key = conv_hash(args.jsonl_file, args.split_ratio)
+    probe_set = load_probes(args.probe_cache, key)
+    if probe_set is not None:
+        console.print(f"Loaded {len(probe_set.probes)} cached probes")
+    else:
+        console.print("[dim]No cached probes found — skipping evidence coverage[/dim]")
+
+    # Extract suffix entities once
+    suffix_texts = [extract_text(t) for t in suffix_turns if t.kind == "system"]
+    suffix_entities = extract_entities("\n".join(suffix_texts))
+    console.print(f"Extracted {suffix_entities.total_count} entities from suffix")
+
+    evidence_results = []
+    entity_results: list[EntityCoverageResult] = []
+
+    for method in methods:
+        console.print(f"\n[bold]{'='*50}[/bold]")
+        console.print(f"[bold]Evaluating: {method} (budget={args.budget:,})[/bold]")
+
+        try:
+            result, compact_speed_s, kept_tokens, total_prefix_tokens = _compact_prefix(
+                method, prefix_turns, args,
+            )
+        except Exception as e:
+            console.print(f"[red]  Compaction error: {e}[/red]")
+            import traceback
+            traceback.print_exc()
+            continue
+
+        console.print(
+            f"  Compacted to {kept_tokens:,} tokens "
+            f"({len(result.kept_turns)} turns) in {compact_speed_s:.1f}s"
+        )
+
+        kept_indices = {t.index for t in result.kept_turns}
+
+        # Evidence turn coverage (only if probes available)
+        if probe_set is not None:
+            ev_result = compute_evidence_coverage(
+                probe_set=probe_set,
+                kept_turn_indices=kept_indices,
+                method=method,
+                budget=args.budget,
+            )
+            ev_result.speed_s = compact_speed_s
+            ev_result.kept_tokens = kept_tokens
+            ev_result.total_tokens = total_prefix_tokens
+            evidence_results.append(ev_result)
+
+        # Entity coverage
+        kept_texts = [extract_text(t) for t in result.kept_turns]
+        kept_entities = extract_entities("\n".join(kept_texts))
+        cov, wcov, type_breakdown = compute_coverage(suffix_entities, kept_entities)
+
+        entity_results.append(EntityCoverageResult(
+            method=method,
+            budget=args.budget,
+            speed_s=compact_speed_s,
+            coverage=cov,
+            weighted_coverage=wcov,
+            type_coverage=type_breakdown,
+            total_tokens=total_prefix_tokens,
+            kept_tokens=kept_tokens,
+            compression=kept_tokens / total_prefix_tokens if total_prefix_tokens > 0 else 0,
+            suffix_entity_count=suffix_entities.total_count,
+            prefix_entity_count=kept_entities.total_count,
+            covered_count=len(suffix_entities.all_entities() & kept_entities.all_entities()),
+        ))
+
+    if not evidence_results and not entity_results:
+        console.print("[red]No results.[/red]")
+        return 1
+
+    _print_evidence_table(evidence_results)
+    _print_entity_table(entity_results)
+
+    if args.verbose and evidence_results:
+        _print_dropped_evidence(evidence_results)
+
+    if args.eval_output:
+        _export_eval_json(evidence_results, entity_results, args.eval_output)
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Plot subcommand
+# ---------------------------------------------------------------------------
+
+def cmd_plot(args: argparse.Namespace) -> int:
+    """Generate Pareto plots from evaluation result JSON files."""
+    from lib.pareto import plot_entity_coverage, plot_type_breakdown
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    # Load results from all input files
+    results = []
+    for f in args.result_files:
+        data = json.loads(f.read_text())
+        if isinstance(data, list):
+            results.extend(data)
+        else:
+            results.append(data)
+
+    if not results:
+        console.print("[red]No results found in input files.[/red]")
+        return 1
+
+    # Deduplicate by (method, kept_tokens)
+    seen = set()
+    unique = []
+    for r in results:
+        key = (r["method"], r.get("kept_tokens", 0))
+        if key not in seen:
+            seen.add(key)
+            unique.append(r)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 7))
+    fig.patch.set_facecolor("#0d1117")
+
+    plot_entity_coverage(ax1, unique, show_legend=True)
+    plot_type_breakdown(ax2, unique)
+
+    plt.tight_layout()
+    output = args.output or Path("pareto_v2.png")
+    fig.savefig(output, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
+    console.print(f"Saved plot to {output}")
+    plt.close()
+
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _parse_file(path: Path) -> list | None:
+    """Parse JSONL and print basic stats. Returns None on error."""
+    if not path.exists():
+        console.print(f"[red]Error: {path} not found[/red]")
+        return None
+    console.print(f"Parsing {path.name}...")
+    return parse_jsonl(path)
+
+
+def _resolve_methods(method_arg: str) -> list[str]:
+    """Resolve 'all' to the list of methods, or return a single method."""
+    if method_arg == "all":
+        return ALL_METHODS
+    return [method_arg]
+
+
+def _compact_prefix(method, prefix_turns, args):
+    """Run a compaction method on prefix turns. Returns (result, speed_s, kept_tokens, total_tokens)."""
+    import time as _time
+
+    prefix_copy = list(prefix_turns)
+    for i, t in enumerate(prefix_copy):
+        t.index = i
+
+    token_counts: dict[int, int] = {}
+    for t in prefix_copy:
+        token_counts[t.index] = turn_tokens(t)
+
+    total_prefix_tokens = sum(token_counts.values())
+
+    # Claude-code LLM summarization is a special path
+    if method == "claude-code":
+        return _compact_claude_code(prefix_copy, token_counts, total_prefix_tokens, args)
+
+    # Standard score-and-select
+    prefix_system = [t for t in prefix_copy if t.kind == "system"]
+    prefix_long = [t for t in prefix_system if token_counts.get(t.index, 0) > args.short_threshold]
+
+    scorer = get_scorer(method)
+    t_start = _time.monotonic()
+    scored = scorer.score(
+        prefix_copy, prefix_long, token_counts,
+        min_repeat_len=args.min_repeat_len,
+        budget=args.budget,
+        short_threshold=args.short_threshold,
+        device=args.device,
+        batch_size=args.batch_size,
+        embed_url=args.embed_url,
+        rerank_url=args.rerank_url,
+    )
+
+    result = select_turns(
+        turns=prefix_copy,
+        scored=scored,
+        token_counts=token_counts,
+        budget=args.budget,
+        short_threshold=args.short_threshold,
+    )
+
+    compact_speed_s = _time.monotonic() - t_start
+    kept_tokens = sum(token_counts.get(t.index, 0) for t in result.kept_turns)
+
+    return result, compact_speed_s, kept_tokens, total_prefix_tokens
+
+
+def _compact_claude_code(prefix_copy, token_counts, total_prefix_tokens, args):
+    """Run claude-code LLM summarization and wrap result for entity evaluation."""
+    import time as _time
+    from lib.llm_compact import llm_compact, make_synthetic_turn
+    from lib.eval.entity_coverage import extract_entities, compute_coverage
+    from lib.selector import SelectionResult
+
+    console.print("  Calling Claude via OpenRouter for summarization...")
+    t_start = _time.monotonic()
+    summary = llm_compact(prefix_copy, args.budget)
+    compact_speed_s = _time.monotonic() - t_start
+
+    synthetic_turn = make_synthetic_turn(summary)
+    kept_tokens = estimate_tokens(summary)
+    console.print(f"  Summary: {kept_tokens:,} tokens in {compact_speed_s:.1f}s")
+
+    # Wrap in a SelectionResult for compatibility
+    result = SelectionResult(kept_turns=[synthetic_turn])
+
+    return result, compact_speed_s, kept_tokens, total_prefix_tokens
+
+
+# ---------------------------------------------------------------------------
+# Result display helpers
+# ---------------------------------------------------------------------------
+
+def _print_evidence_table(evidence_results):
+    """Print evidence turn coverage table."""
+    if not evidence_results:
+        console.print("\n[dim]Evidence coverage: skipped (no probes)[/dim]")
+        return
+
+    from lib.eval.probes import DIMENSIONS
+
+    table = Table(title="\nEvidence Turn Coverage", show_header=True, header_style="bold")
+    table.add_column("Metric", style="bold")
+    for r in evidence_results:
+        table.add_column(f"{r.method}\n({r.budget:,} budget)", justify="right")
+
+    for dim_name, dim_weight in DIMENSIONS.items():
+        label = f"{dim_name} (w={dim_weight:.2f})"
+        values = []
+        for r in evidence_results:
+            d = r.dimension_map.get(dim_name)
+            if d and d.probe_count > 0:
+                values.append(f"{d.mean_coverage:.3f}  ({d.probe_count}p)")
+            else:
+                values.append("—")
+        table.add_row(label, *values)
+
+    table.add_row("─" * 24, *["─" * 14 for _ in evidence_results])
+    table.add_row("[bold]Composite[/bold]", *[f"[bold]{r.composite:.3f}[/bold]" for r in evidence_results])
+    table.add_row("NDCG (difficulty-weighted)", *[f"{r.ndcg:.3f}" for r in evidence_results])
+    table.add_row("Speed (s)", *[f"{r.speed_s:.2f}" for r in evidence_results])
+    table.add_row("Tokens (kept / total)", *[f"{r.kept_tokens:,} / {r.total_tokens:,}" for r in evidence_results])
+
+    console.print(table)
+
+
+def _print_entity_table(entity_results):
+    """Print entity preservation table."""
+    if not entity_results:
+        return
+
+    from lib.eval.entity_coverage import ENTITY_TYPES
+
+    table = Table(title="\nEntity Preservation", show_header=True, header_style="bold")
+    table.add_column("Metric", style="bold")
+    for r in entity_results:
+        table.add_column(f"{r.method}\n({r.budget:,} budget)", justify="right")
+
+    all_types = sorted(
+        {t for r in entity_results for t in r.type_coverage},
+        key=lambda t: ENTITY_TYPES.get(t, 0),
+        reverse=True,
+    )
+    for etype in all_types:
+        label = f"{etype} (w={ENTITY_TYPES.get(etype, 0):.1f})"
+        values = []
+        for r in entity_results:
+            tc = r.type_coverage.get(etype)
+            if tc:
+                values.append(f"{tc['coverage']:.3f}  ({tc['covered']}/{tc['total']})")
+            else:
+                values.append("—")
+        table.add_row(label, *values)
+
+    table.add_row("─" * 24, *["─" * 18 for _ in entity_results])
+    table.add_row("[bold]Coverage (unweighted)[/bold]", *[f"{r.coverage:.3f}" for r in entity_results])
+    table.add_row("[bold]Coverage (weighted)[/bold]", *[f"[bold]{r.weighted_coverage:.3f}[/bold]" for r in entity_results])
+    table.add_row("Suffix entities", *[f"{r.suffix_entity_count}" for r in entity_results])
+    table.add_row("Covered entities", *[f"{r.covered_count}" for r in entity_results])
+
+    console.print(table)
+
+
+def _print_dropped_evidence(evidence_results):
+    """Print dropped evidence details."""
+    for r in evidence_results:
+        dropped = [p for p in r.probe_details if p.coverage < 1.0]
+        if dropped:
+            console.print(f"\n  [yellow]{r.method}[/yellow] — dropped evidence:")
+            for p in dropped:
+                console.print(
+                    f"    {p.probe_id} ({p.dimension}, {p.difficulty}): "
+                    f"coverage={p.coverage:.2f}  "
+                    f"kept={p.kept_evidence}  dropped={p.dropped_evidence}"
+                )
+
+
+def _export_eval_json(evidence_results, entity_results, output_path):
+    """Export evaluation results as JSON."""
+    data = []
+    if evidence_results:
+        for i, ev in enumerate(evidence_results):
+            entry = ev.to_dict()
+            if i < len(entity_results):
+                entry["entity_coverage"] = entity_results[i].to_dict()
+            data.append(entry)
+    else:
+        for ent in entity_results:
+            data.append(ent.to_dict())
+    output_path.write_text(json.dumps(data, indent=2))
+    console.print(f"\nResults exported to {output_path}")
+
+
+# ---------------------------------------------------------------------------
+# CLI argument parsing
+# ---------------------------------------------------------------------------
+
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    """Add arguments shared between compact and evaluate."""
+    parser.add_argument("jsonl_file", type=Path, help="Path to the JSONL conversation file")
+    parser.add_argument("--method", choices=list(SCORERS.keys()) + ["claude-code", "all"],
+                        default="eitf", help="Scoring method (default: eitf)")
+    parser.add_argument("--budget", type=int, default=80_000, help="Target token budget (default: 80000)")
+    parser.add_argument("--short-threshold", type=int, default=300,
+                        help="System turns <= this many tokens are always kept (default: 300)")
+    parser.add_argument("--device", type=str, default="cpu", help="PyTorch device for embed method")
+    parser.add_argument("--batch-size", type=int, default=16, help="Embedding batch size")
+    parser.add_argument("--min-repeat-len", type=int, default=64,
+                        help="Min repeated substring length for dedup")
+    parser.add_argument("--embed-url", type=str, default="http://localhost:8080",
+                        help="llama.cpp embedding server URL")
+    parser.add_argument("--rerank-url", type=str, default="http://localhost:8181",
+                        help="llama.cpp reranker server URL")
+    parser.add_argument("--verbose", action="store_true", help="Show detailed breakdown")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI argument parser with subcommands."""
+    parser = argparse.ArgumentParser(
+        description="Supercompact: conversation compaction for Claude Code JSONL histories.",
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # --- compact (default when no subcommand given) ---
+    compact_p = subparsers.add_parser("compact", help="Compact a conversation (default)")
+    _add_common_args(compact_p)
+    compact_p.add_argument("--output", type=Path, help="Write compacted JSONL to this file")
+    compact_p.add_argument("--scores-file", type=Path, help="Write scores CSV to this file")
+    compact_p.add_argument("--dry-run", action="store_true", help="Use random scores")
+
+    # --- evaluate ---
+    eval_p = subparsers.add_parser("evaluate", help="Run entity preservation evaluation")
+    _add_common_args(eval_p)
+    eval_p.add_argument("--split-ratio", type=float, default=0.70, help="Prefix/suffix split ratio")
+    eval_p.add_argument("--probe-cache", type=Path, default=Path("eval_cache"),
+                        help="Directory for cached probe sets")
+    eval_p.add_argument("--eval-output", type=Path, help="Export results as JSON")
+
+    # --- plot ---
+    plot_p = subparsers.add_parser("plot", help="Generate Pareto plots from eval results")
+    plot_p.add_argument("result_files", type=Path, nargs="+", help="JSON result files to plot")
+    plot_p.add_argument("-o", "--output", type=Path, help="Output image path (default: pareto_v2.png)")
+
+    return parser
+
+
+def main() -> int:
+    # If the first arg looks like a file (not a subcommand), prepend 'compact'
+    subcommands = {"compact", "evaluate", "plot"}
+    argv = sys.argv[1:]
+    if argv and argv[0] not in subcommands and not argv[0].startswith("-"):
+        argv = ["compact"] + argv
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "compact":
+        return cmd_compact(args)
+    elif args.command == "evaluate":
+        return cmd_evaluate(args)
+    elif args.command == "plot":
+        return cmd_plot(args)
+    else:
+        parser.print_help()
+        return 1
 
 
 if __name__ == "__main__":
