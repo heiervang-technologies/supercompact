@@ -134,6 +134,31 @@ def _print_score_details(result: SelectionResult) -> None:
         console.print(table)
 
 
+def write_summary_text(result: SelectionResult, output_path: Path) -> None:
+    """Write kept turns as formatted text suitable for Claude's compaction summary.
+
+    Produces a narrative-style summary that preserves the conversation flow,
+    including user requests, assistant actions, tool calls, and key outputs.
+    """
+    parts: list[str] = []
+
+    for turn in result.kept_turns:
+        role = "User" if turn.kind == "user" else "Assistant"
+        text = extract_text(turn).strip()
+        if not text:
+            continue
+
+        # Truncate very long turns but keep enough for comprehension
+        if len(text) > 4000:
+            text = text[:4000] + "\n[... truncated]"
+
+        parts.append(f"[{role} (turn {turn.index})]:\n{text}")
+
+    summary = "\n\n---\n\n".join(parts)
+    output_path.write_text(summary)
+    console.print(f"\nWrote summary text to {output_path}")
+
+
 def write_compacted_jsonl(result: SelectionResult, output_path: Path) -> None:
     """Write kept turns back to a JSONL file."""
     with open(output_path, "w") as f:

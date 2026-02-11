@@ -35,7 +35,7 @@ from lib.parser import parse_jsonl, extract_text
 from lib.tokenizer import turn_tokens, estimate_tokens
 from lib.types import ScoredTurn, build_query, random_scores
 from lib.selector import select_turns
-from lib.formatter import print_stats, write_compacted_jsonl, write_scores_csv
+from lib.formatter import print_stats, write_compacted_jsonl, write_summary_text, write_scores_csv
 from lib.scorer_base import SCORERS, LOCAL_METHODS, ALL_METHODS, get_scorer
 
 console = Console()
@@ -115,7 +115,11 @@ def cmd_compact(args: argparse.Namespace) -> int:
     console.print(f"\nMethod: {args.method} | Wall time: {t_elapsed:.1f}s")
 
     if args.output:
-        write_compacted_jsonl(result, args.output)
+        fmt = getattr(args, "format", "jsonl")
+        if fmt == "summary":
+            write_summary_text(result, args.output)
+        else:
+            write_compacted_jsonl(result, args.output)
 
     if args.scores_file:
         kept_indices = {t.index for t in result.kept_turns}
@@ -519,7 +523,9 @@ def build_parser() -> argparse.ArgumentParser:
     # --- compact (default when no subcommand given) ---
     compact_p = subparsers.add_parser("compact", help="Compact a conversation (default)")
     _add_common_args(compact_p)
-    compact_p.add_argument("--output", type=Path, help="Write compacted JSONL to this file")
+    compact_p.add_argument("--output", type=Path, help="Write compacted output to this file")
+    compact_p.add_argument("--format", choices=["jsonl", "summary"], default="jsonl",
+                           help="Output format: jsonl (default) or summary (text for Claude context)")
     compact_p.add_argument("--scores-file", type=Path, help="Write scores CSV to this file")
     compact_p.add_argument("--dry-run", action="store_true", help="Use random scores")
 
