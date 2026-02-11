@@ -75,7 +75,7 @@ All methods follow the same pipeline: **score** each assistant turn, then **sele
 
 | Method | How it works | Requirements |
 |--------|-------------|-------------|
-| **claude-code** | Sends the conversation to Claude Sonnet via OpenRouter for LLM summarization. Simulates `/compact` behavior. Used as a baseline in evaluations. | `OPENROUTER_API_KEY` env var |
+| **claude-code** | Sends the conversation to Claude for LLM summarization. Simulates `/compact` behavior. Used as a baseline in evaluations. | Authenticated Claude Code installation |
 
 ## CLI Reference
 
