@@ -1,0 +1,22 @@
+[project]
+name = "supercompact"
+version = "0.2.0"
+description = "Conversation compaction for Claude Code JSONL histories"
+requires-python = ">=3.11"
+dependencies = [
+    "rich",
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "matplotlib>=3.10.8",
+    "transformers>=5.0.0",
+    "anthropic>=0.40",
+]
+
+[project.scripts]
+supercompact = "compact:main"
+
+[project.optional-dependencies]
+torch = [
+    "torch>=2.0",
+    "transformers>=4.51.0",
+]

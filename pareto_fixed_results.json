@@ -1,0 +1,65 @@
+[
+  {
+    "method": "dedup",
+    "budget": 20000,
+    "recall": 0.12679082898531083,
+    "speed_s": 1.2032991649975884,
+    "compression": 0.1525266970295183,
+    "kept_tokens": 19625,
+    "total_tokens": 128666
+  },
+  {
+    "method": "llama-embed",
+    "budget": 20000,
+    "recall": 0.14908669164997276,
+    "speed_s": 53.48291651400359,
+    "compression": 0.15173394680801455,
+    "kept_tokens": 19523,
+    "total_tokens": 128666
+  },
+  {
+    "method": "llama-rerank",
+    "budget": 20000,
+    "recall": 0.15599916986891066,
+    "speed_s": 64.12228744200547,
+    "compression": 0.15401893274058415,
+    "kept_tokens": 19817,
+    "total_tokens": 128666
+  },
+  {
+    "method": "dedup",
+    "budget": 2000,
+    "recall": 0.09311615628918912,
+    "speed_s": 1.1690478539967444,
+    "compression": 0.10827258172322136,
+    "kept_tokens": 13931,
+    "total_tokens": 128666
+  },
+  {
+    "method": "llama-embed",
+    "budget": 2000,
+    "recall": 0.09311615628918912,
+    "speed_s": 92.24430768700404,
+    "compression": 0.10827258172322136,
+    "kept_tokens": 13931,
+    "total_tokens": 128666
+  },
+  {
+    "method": "llama-rerank",
+    "budget": 2000,
+    "recall": 0.09311615628918912,
+    "speed_s": 112.46602701600204,
+    "compression": 0.10827258172322136,
+    "kept_tokens": 13931,
+    "total_tokens": 128666
+  },
+  {
+    "method": "claude-code",
+    "budget": 2544,
+    "recall": 0.02710665910114431,
+    "speed_s": 80.0,
+    "compression": 0.019772123171622648,
+    "kept_tokens": 2544,
+    "total_tokens": 128666
+  }
+]

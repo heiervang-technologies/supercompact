@@ -1,0 +1,230 @@
+[
+  {
+    "method": "claude-code",
+    "budget": 40000,
+    "speed_s": 68.22000174299865,
+    "coverage": 0.02338269680436477,
+    "weighted_coverage": 0.021375686649152133,
+    "f1": 0.04185064535772776,
+    "total_tokens": 357114,
+    "kept_tokens": 2435,
+    "compression": 0.006818550938915865,
+    "suffix_entity_count": 1283,
+    "prefix_entity_count": 58,
+    "covered_count": 30,
+    "type_coverage": {
+      "file_path": {
+        "covered": 6,
+        "total": 326,
+        "coverage": 0.018404907975460124,
+        "weight": 1.0
+      },
+      "exception": {
+        "covered": 0,
+        "total": 16,
+        "coverage": 0.0,
+        "weight": 0.9
+      },
+      "url": {
+        "covered": 2,
+        "total": 98,
+        "coverage": 0.02040816326530612,
+        "weight": 0.8
+      },
+      "port": {
+        "covered": 2,
+        "total": 48,
+        "coverage": 0.041666666666666664,
+        "weight": 0.8
+      },
+      "command": {
+        "covered": 0,
+        "total": 4,
+        "coverage": 0.0,
+        "weight": 0.7
+      },
+      "package": {
+        "covered": 0,
+        "total": 5,
+        "coverage": 0.0,
+        "weight": 0.7
+      },
+      "function": {
+        "covered": 7,
+        "total": 591,
+        "coverage": 0.011844331641285956,
+        "weight": 0.5
+      },
+      "class_name": {
+        "covered": 6,
+        "total": 99,
+        "coverage": 0.06060606060606061,
+        "weight": 0.4
+      },
+      "env_var": {
+        "covered": 7,
+        "total": 94,
+        "coverage": 0.07446808510638298,
+        "weight": 0.4
+      },
+      "http_status": {
+        "covered": 0,
+        "total": 2,
+        "coverage": 0.0,
+        "weight": 0.6
+      }
+    }
+  },
+  {
+    "method": "claude-code",
+    "budget": 80000,
+    "speed_s": 70.5959198970013,
+    "coverage": 0.02338269680436477,
+    "weighted_coverage": 0.021375686649152133,
+    "f1": 0.04185064535772776,
+    "total_tokens": 357114,
+    "kept_tokens": 2435,
+    "compression": 0.006818550938915865,
+    "suffix_entity_count": 1283,
+    "prefix_entity_count": 58,
+    "covered_count": 30,
+    "type_coverage": {
+      "file_path": {
+        "covered": 6,
+        "total": 326,
+        "coverage": 0.018404907975460124,
+        "weight": 1.0
+      },
+      "exception": {
+        "covered": 0,
+        "total": 16,
+        "coverage": 0.0,
+        "weight": 0.9
+      },
+      "url": {
+        "covered": 2,
+        "total": 98,
+        "coverage": 0.02040816326530612,
+        "weight": 0.8
+      },
+      "port": {
+        "covered": 2,
+        "total": 48,
+        "coverage": 0.041666666666666664,
+        "weight": 0.8
+      },
+      "command": {
+        "covered": 0,
+        "total": 4,
+        "coverage": 0.0,
+        "weight": 0.7
+      },
+      "package": {
+        "covered": 0,
+        "total": 5,
+        "coverage": 0.0,
+        "weight": 0.7
+      },
+      "function": {
+        "covered": 7,
+        "total": 591,
+        "coverage": 0.011844331641285956,
+        "weight": 0.5
+      },
+      "class_name": {
+        "covered": 6,
+        "total": 99,
+        "coverage": 0.06060606060606061,
+        "weight": 0.4
+      },
+      "env_var": {
+        "covered": 7,
+        "total": 94,
+        "coverage": 0.07446808510638298,
+        "weight": 0.4
+      },
+      "http_status": {
+        "covered": 0,
+        "total": 2,
+        "coverage": 0.0,
+        "weight": 0.6
+      }
+    }
+  },
+  {
+    "method": "claude-code",
+    "budget": 120000,
+    "speed_s": 68.28302484999949,
+    "coverage": 0.02338269680436477,
+    "weighted_coverage": 0.021375686649152133,
+    "f1": 0.04185064535772776,
+    "total_tokens": 357114,
+    "kept_tokens": 2435,
+    "compression": 0.006818550938915865,
+    "suffix_entity_count": 1283,
+    "prefix_entity_count": 58,
+    "covered_count": 30,
+    "type_coverage": {
+      "file_path": {
+        "covered": 6,
+        "total": 326,
+        "coverage": 0.018404907975460124,
+        "weight": 1.0
+      },
+      "exception": {
+        "covered": 0,
+        "total": 16,
+        "coverage": 0.0,
+        "weight": 0.9
+      },
+      "url": {
+        "covered": 2,
+        "total": 98,
+        "coverage": 0.02040816326530612,
+        "weight": 0.8
+      },
+      "port": {
+        "covered": 2,
+        "total": 48,
+        "coverage": 0.041666666666666664,
+        "weight": 0.8
+      },
+      "command": {
+        "covered": 0,
+        "total": 4,
+        "coverage": 0.0,
+        "weight": 0.7
+      },
+      "package": {
+        "covered": 0,
+        "total": 5,
+        "coverage": 0.0,
+        "weight": 0.7
+      },
+      "function": {
+        "covered": 7,
+        "total": 591,
+        "coverage": 0.011844331641285956,
+        "weight": 0.5
+      },
+      "class_name": {
+        "covered": 6,
+        "total": 99,
+        "coverage": 0.06060606060606061,
+        "weight": 0.4
+      },
+      "env_var": {
+        "covered": 7,
+        "total": 94,
+        "coverage": 0.07446808510638298,
+        "weight": 0.4
+      },
+      "http_status": {
+        "covered": 0,
+        "total": 2,
+        "coverage": 0.0,
+        "weight": 0.6
+      }
+    }
+  }
+]
