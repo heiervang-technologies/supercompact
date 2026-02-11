@@ -1,0 +1,78 @@
+[
+  {
+    "method": "eitf",
+    "budget": 200000,
+    "speed_s": 0.19879151500026637,
+    "coverage": 0.22759158222915044,
+    "weighted_coverage": 0.21208502507762117,
+    "f1": 0.28626501424653683,
+    "total_tokens": 357114,
+    "kept_tokens": 199895,
+    "compression": 0.5597512278992143,
+    "suffix_entity_count": 1283,
+    "prefix_entity_count": 1202,
+    "covered_count": 292,
+    "type_coverage": {
+      "file_path": {
+        "covered": 53,
+        "total": 326,
+        "coverage": 0.16257668711656442,
+        "weight": 1.0
+      },
+      "exception": {
+        "covered": 5,
+        "total": 16,
+        "coverage": 0.3125,
+        "weight": 0.9
+      },
+      "url": {
+        "covered": 24,
+        "total": 98,
+        "coverage": 0.24489795918367346,
+        "weight": 0.8
+      },
+      "port": {
+        "covered": 6,
+        "total": 48,
+        "coverage": 0.125,
+        "weight": 0.8
+      },
+      "command": {
+        "covered": 0,
+        "total": 4,
+        "coverage": 0.0,
+        "weight": 0.7
+      },
+      "package": {
+        "covered": 2,
+        "total": 5,
+        "coverage": 0.4,
+        "weight": 0.7
+      },
+      "function": {
+        "covered": 137,
+        "total": 591,
+        "coverage": 0.23181049069373943,
+        "weight": 0.5
+      },
+      "class_name": {
+        "covered": 24,
+        "total": 99,
+        "coverage": 0.24242424242424243,
+        "weight": 0.4
+      },
+      "env_var": {
+        "covered": 40,
+        "total": 94,
+        "coverage": 0.425531914893617,
+        "weight": 0.4
+      },
+      "http_status": {
+        "covered": 1,
+        "total": 2,
+        "coverage": 0.5,
+        "weight": 0.6
+      }
+    }
+  }
+]
