@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# codex-compact — Run supercompact on the current/latest Codex CLI session.
+#
+# Replaces Codex's built-in LLM compaction with EITF entity-preservation
+# compaction. ~400x faster, 2x better entity retention, no API calls.
+#
+# Usage:
+#   codex-compact                    # Compact latest session with defaults
+#   codex-compact --budget 120000    # Custom token budget
+#   codex-compact --method setcover  # Different scoring method
+#   codex-compact --session FILE     # Specific session file
+#   codex-compact --dry-run          # Show what would happen without changing files
+#   codex-compact --list             # List recent sessions
+#
+# Configuration (environment variables):
+#   SUPERCOMPACT_METHOD   Scoring method (default: eitf)
+#   SUPERCOMPACT_BUDGET   Token budget (default: 80000)
+
+set -euo pipefail
+
+# Resolve script location and supercompact directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SUPERCOMPACT_DIR="$(cd "${SCRIPT_DIR}/../../" && pwd)"
+
+# Verify supercompact is available
+if [[ ! -f "${SUPERCOMPACT_DIR}/compact.py" ]]; then
+    echo "Error: supercompact not found at ${SUPERCOMPACT_DIR}" >&2
+    echo "Expected compact.py at: ${SUPERCOMPACT_DIR}/compact.py" >&2
+    exit 1
+fi
+
+# Defaults from environment
+METHOD="${SUPERCOMPACT_METHOD:-eitf}"
+BUDGET="${SUPERCOMPACT_BUDGET:-80000}"
+SESSION_FILE=""
+DRY_RUN=false
+LIST_SESSIONS=false
+VERBOSE=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --method)     METHOD="$2"; shift 2 ;;
+        --budget)     BUDGET="$2"; shift 2 ;;
+        --session)    SESSION_FILE="$2"; shift 2 ;;
+        --dry-run)    DRY_RUN=true; shift ;;
+        --list)       LIST_SESSIONS=true; shift ;;
+        --verbose|-v) VERBOSE=true; shift ;;
+        --help|-h)
+            echo "Usage: codex-compact [OPTIONS]"
+            echo ""
+            echo "Run supercompact on the current/latest Codex CLI session."
+            echo ""
+            echo "Options:"
+            echo "  --method METHOD    Scoring method: eitf (default), setcover, dedup"
+            echo "  --budget TOKENS    Target token budget (default: 80000)"
+            echo "  --session FILE     Specific session JSONL file"
+            echo "  --dry-run          Show what would happen without modifying files"
+            echo "  --list             List recent Codex sessions"
+            echo "  --verbose, -v      Show detailed output"
+            echo "  --help, -h         Show this help"
+            echo ""
+            echo "Environment variables:"
+            echo "  SUPERCOMPACT_METHOD   Default scoring method"
+            echo "  SUPERCOMPACT_BUDGET   Default token budget"
+            exit 0
+            ;;
+        *)
+            if [[ "$1" =~ ^[0-9]+$ ]]; then
+                BUDGET="$1"
+            elif [[ -f "$1" ]]; then
+                SESSION_FILE="$1"
+            else
+                echo "Unknown argument: $1" >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# Codex sessions directory (respects CODEX_HOME env var)
+CODEX_SESSIONS="${CODEX_HOME:-${HOME}/.codex}/sessions"
+
+# Portable: find most recent file (works on GNU and BSD/macOS)
+find_latest_session() {
+    local dir="$1"
+    find "${dir}" -name "rollout-*.jsonl" -type f 2>/dev/null \
+        | xargs ls -t 2>/dev/null \
+        | head -1
+}
+
+# List sessions mode
+if [[ "${LIST_SESSIONS}" == true ]]; then
+    if [[ ! -d "${CODEX_SESSIONS}" ]]; then
+        echo "No Codex sessions found (${CODEX_SESSIONS} does not exist)"
+        exit 0
+    fi
+    echo "Recent Codex sessions:"
+    echo ""
+    # Portable listing: use ls -lt on found files
+    find "${CODEX_SESSIONS}" -name "rollout-*.jsonl" -type f 2>/dev/null \
+        | xargs ls -t 2>/dev/null \
+        | head -20 \
+        | while read -r path; do
+            size=$(wc -l < "${path}")
+            printf "  (%d lines)  %s\n" "${size}" "${path}"
+        done
+    exit 0
+fi
+
+# Find the session file
+if [[ -z "${SESSION_FILE}" ]]; then
+    if [[ ! -d "${CODEX_SESSIONS}" ]]; then
+        echo "Error: No Codex sessions found (${CODEX_SESSIONS} does not exist)" >&2
+        echo "Run Codex CLI first to create a session." >&2
+        exit 1
+    fi
+
+    SESSION_FILE=$(find_latest_session "${CODEX_SESSIONS}")
+
+    if [[ -z "${SESSION_FILE}" ]]; then
+        echo "Error: No Codex session files found in ${CODEX_SESSIONS}" >&2
+        exit 1
+    fi
+fi
+
+if [[ ! -f "${SESSION_FILE}" ]]; then
+    echo "Error: Session file not found: ${SESSION_FILE}" >&2
+    exit 1
+fi
+
+LINE_COUNT=$(wc -l < "${SESSION_FILE}")
+FILE_SIZE=$(du -h "${SESSION_FILE}" | cut -f1)
+
+echo "Codex session: ${SESSION_FILE}"
+echo "  ${LINE_COUNT} lines, ${FILE_SIZE}"
+echo "  Method: ${METHOD}, Budget: ${BUDGET}"
+echo ""
+
+if [[ "${LINE_COUNT}" -lt 3 ]]; then
+    echo "Session too small to compact (< 3 lines). Nothing to do."
+    exit 0
+fi
+
+# Create backup before modifying anything
+BACKUP_FILE="${SESSION_FILE}.pre-supercompact"
+if [[ "${DRY_RUN}" == false ]]; then
+    cp "${SESSION_FILE}" "${BACKUP_FILE}"
+    echo "Backup saved: ${BACKUP_FILE}"
+fi
+
+# Build arguments for compact_codex.py
+PYTHON_ARGS=("${SESSION_FILE}" --method "${METHOD}" --budget "${BUDGET}")
+OUTPUT_FILE="/tmp/supercompact-codex-$$.jsonl"
+PYTHON_ARGS+=(--output "${OUTPUT_FILE}")
+if [[ "${VERBOSE}" == true ]]; then
+    PYTHON_ARGS+=(--verbose)
+fi
+
+echo ""
+echo "Running supercompact (${METHOD})..."
+echo ""
+
+# Run the Python entry point
+if (cd "${SUPERCOMPACT_DIR}" && uv run python "${SCRIPT_DIR}/compact_codex.py" "${PYTHON_ARGS[@]}") 2>&1; then
+    COMPACT_SUCCESS=true
+else
+    COMPACT_SUCCESS=false
+fi
+
+echo ""
+
+if [[ "${COMPACT_SUCCESS}" == true && -f "${OUTPUT_FILE}" ]]; then
+    NEW_LINES=$(wc -l < "${OUTPUT_FILE}")
+    NEW_SIZE=$(du -h "${OUTPUT_FILE}" | cut -f1)
+
+    echo "Result: ${LINE_COUNT} -> ${NEW_LINES} lines (${FILE_SIZE} -> ${NEW_SIZE})"
+
+    if [[ "${DRY_RUN}" == true ]]; then
+        echo ""
+        echo "[Dry run] Would replace session file. No changes made."
+        rm -f "${OUTPUT_FILE}"
+    else
+        mv "${OUTPUT_FILE}" "${SESSION_FILE}"
+        echo ""
+        echo "Session compacted successfully."
+        echo "  Backup: ${BACKUP_FILE}"
+        echo "  To restore: cp '${BACKUP_FILE}' '${SESSION_FILE}'"
+    fi
+else
+    echo "Error: Compaction failed." >&2
+    if [[ "${DRY_RUN}" == false && -f "${BACKUP_FILE}" ]]; then
+        cp "${BACKUP_FILE}" "${SESSION_FILE}"
+        echo "Session restored from backup." >&2
+    fi
+    rm -f "${OUTPUT_FILE}" 2>/dev/null || true
+    exit 1
+fi
