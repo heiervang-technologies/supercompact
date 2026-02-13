@@ -6,9 +6,53 @@ Harder better faster stronger compacting for your AI agent.
 
 Unlike Claude Code's built-in `/compact` (which summarizes via LLM), supercompact uses **score-and-select**: it scores every assistant turn by relevance, then greedily selects the most important turns to keep within budget. The original turns are preserved verbatim — nothing is paraphrased or lost.
 
+## Install
+
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+
+### Claude Code
+
+```bash
+git clone https://github.com/heiervang-technologies/supercompact.git
+cd supercompact
+./plugins/claude-code/install.sh
+```
+
+Then start Claude Code with the plugin:
+
+```bash
+claude --plugin-dir ~/.local/share/supercompact/claude-code/plugin
+```
+
+Compaction now uses EITF automatically — both `/compact` and auto-compact.
+
+### OpenAI Codex CLI
+
+```bash
+git clone https://github.com/heiervang-technologies/supercompact.git
+cd supercompact
+./plugins/codex-cli/install.sh
+```
+
+Then compact on demand or run the background daemon:
+
+```bash
+codex-compact                  # compact latest session
+codex-compact-watch            # auto-intercept compaction
+```
+
+### Uninstall
+
+```bash
+./plugins/claude-code/uninstall.sh   # Claude Code
+./plugins/codex-cli/uninstall.sh     # Codex CLI
+```
+
+---
+
 ## Why?
 
-When a Claude Code session gets long, context compaction becomes critical. The built-in `/compact` command uses LLM summarization, which:
+When a coding agent session gets long, context compaction becomes critical. The built-in `/compact` in both Claude Code and Codex CLI uses LLM summarization, which:
 
 - Is slow (~30s+ per compaction)
 - Loses exact technical details (file paths get paraphrased, error messages get summarized)
@@ -16,12 +60,12 @@ When a Claude Code session gets long, context compaction becomes critical. The b
 
 supercompact's EITF method runs in **<1 second** on any hardware (no GPU, no API calls) and preserves **~2x more entities** than LLM summarization at the same token budget.
 
-## Installation
+## Standalone Usage
 
-Requires Python 3.11+. Install with [uv](https://docs.astral.sh/uv/):
+If you want to use supercompact as a CLI tool without installing the plugins:
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/heiervang-technologies/supercompact.git
 cd supercompact
 uv sync
 ```
@@ -33,8 +77,6 @@ uv sync --extra torch
 ```
 
 The `llama-embed` and `llama-rerank` methods require a running [llama.cpp](https://github.com/ggerganov/llama.cpp) server (see [Embedding & Reranking Methods](#embedding--reranking-methods)).
-
-## Quick Start
 
 ```bash
 # Compact a conversation to 80k tokens using EITF (default)
@@ -172,26 +214,24 @@ An optional second metric using LLM-generated probes. An LLM reads the full conv
 
 Probes are cached per (conversation, split_ratio) pair. Evidence coverage measures whether the turns containing probe answers are kept by each method.
 
-## Claude Code Integration
+## Plugin Details
 
-supercompact ships as a Claude Code slash command. Add it to your project or install globally:
+Both plugins replace the CLI's built-in LLM summarization with EITF scoring. Configuration via environment variables:
 
-### Usage
+```bash
+PLUGIN_SETTING_METHOD=eitf             # eitf, setcover, dedup
+PLUGIN_SETTING_BUDGET=80000            # token budget
+PLUGIN_SETTING_FALLBACK_TO_BUILTIN=true  # fall back to LLM on error
+```
 
-In any Claude Code session:
+The Claude Code plugin also provides a `/supercompact` slash command for manual compaction:
 
 ```
 /supercompact           # Compact with default 80k budget
 /supercompact 60000     # Compact with custom budget
 ```
 
-The slash command:
-1. Finds the current session's JSONL transcript
-2. Runs EITF compaction at the specified budget
-3. Replaces the session JSONL (with backup)
-4. Restarts Claude Code to load the compacted context
-
-The command file is at `.claude/commands/supercompact.md`.
+See `plugins/claude-code/README.md` and `plugins/codex-cli/README.md` for full details.
 
 ## Architecture
 
