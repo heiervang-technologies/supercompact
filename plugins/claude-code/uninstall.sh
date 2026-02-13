@@ -131,6 +131,18 @@ if [[ "$DO_REMOVE" == true ]]; then
         ok "No plugin files found at ${INSTALL_DIR}"
     fi
 
+    # Remove pluginDirs entry from settings.json
+    SETTINGS_FILE="${HOME}/.claude/settings.json"
+    PLUGIN_PATH="${INSTALL_DIR}/plugin"
+    if [[ -f "${SETTINGS_FILE}" ]] && command -v jq &>/dev/null; then
+        if jq -e --arg p "${PLUGIN_PATH}" '.pluginDirs | index($p)' "${SETTINGS_FILE}" >/dev/null 2>&1; then
+            info "Removing plugin from settings.json..."
+            jq --arg p "${PLUGIN_PATH}" '.pluginDirs = [.pluginDirs[] | select(. != $p)]' "${SETTINGS_FILE}" > "${SETTINGS_FILE}.tmp" \
+                && mv "${SETTINGS_FILE}.tmp" "${SETTINGS_FILE}"
+            ok "Plugin removed from settings.json"
+        fi
+    fi
+
     # Remove log directory
     LOG_DIR="${HOME}/.cache/supercompact"
     if [[ -d "$LOG_DIR" ]]; then
