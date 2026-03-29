@@ -11,7 +11,6 @@ import os
 import httpx
 
 from .parser import Turn, extract_text
-from .tokenizer import estimate_tokens
 
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
