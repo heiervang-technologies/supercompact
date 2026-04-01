@@ -107,7 +107,11 @@ if uv run python compact.py "${JSONL_FILE}" \
   if command -v unleash-refresh &>/dev/null; then
     echo "$(date -Iseconds) Restarting via unleash-refresh" >> "${LOG_DIR}/hook.log"
     unleash-refresh "COMPACT COMPLETE. Previous context has been summarized. Continue with your current task."
-    # If unleash-refresh returns (shouldn't normally), exit cleanly
+    
+    # Block to ensure Claude Code processes the SIGINT and shuts down BEFORE this
+    # script exits. This prevents a race condition where the hook completes and 
+    # Claude starts the API compaction call before the SIGINT is fully handled.
+    sleep 10
     exit 0
   else
     echo "$(date -Iseconds) WARNING: unleash-refresh not found — compacted JSONL is on disk but Claude's API compact will still run over it" >> "${LOG_DIR}/hook.log"

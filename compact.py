@@ -68,6 +68,26 @@ def cmd_compact(args: argparse.Namespace) -> int:
 
     if total_tokens <= args.budget:
         console.print(f"[green]Already within budget ({total_tokens:,} <= {args.budget:,}), nothing to compact.[/green]")
+        if args.output:
+            from lib.selector import SelectionResult
+            # Wrap in SelectionResult and just use all turns as kept_turns
+            result = SelectionResult(
+                kept_turns=turns,
+                kept_scored=[],
+                dropped_turns=[],
+                budget=args.budget,
+                short_threshold=args.short_threshold,
+                user_tokens=sum(token_counts.get(t.index, 0) for t in user_turns),
+                short_system_tokens=sum(token_counts.get(t.index, 0) for t in short_system),
+                scored_kept_tokens=0,
+                scored_dropped_tokens=0,
+                total_input_tokens=total_tokens,
+            )
+            fmt = getattr(args, "format", "jsonl")
+            if fmt == "summary":
+                write_summary_text(result, args.output)
+            else:
+                write_compacted_jsonl(result, args.output)
         return 0
 
     # Identify long system turns that need scoring
