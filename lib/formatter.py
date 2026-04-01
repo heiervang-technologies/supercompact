@@ -161,6 +161,29 @@ def write_summary_text(result: SelectionResult, output_path: Path) -> None:
 
 def write_compacted_jsonl(result: SelectionResult, output_path: Path) -> None:
     """Write kept turns back to a JSONL file."""
+    
+    # Fix the parentUuid chain so claude-code can load the transcript
+    # without breaking at missing messages.
+    last_uuid = None
+    for turn in result.kept_turns:
+        # Find the first message in this turn to link to the previous turn
+        first_msg_idx = -1
+        for i, record in enumerate(turn.lines):
+            if isinstance(record, dict) and record.get("type") in ("user", "assistant", "system", "attachment"):
+                first_msg_idx = i
+                break
+                
+        if first_msg_idx >= 0 and last_uuid is not None:
+            # We ONLY rewrite parentUuid if it already exists, to avoid touching root nodes
+            if "parentUuid" in turn.lines[first_msg_idx]:
+                turn.lines[first_msg_idx]["parentUuid"] = last_uuid
+                
+        # Find the last message in this turn to be the parent for the next turn
+        for record in reversed(turn.lines):
+            if isinstance(record, dict) and "uuid" in record and record.get("type") in ("user", "assistant", "system", "attachment"):
+                last_uuid = record["uuid"]
+                break
+
     with open(output_path, "w") as f:
         for turn in result.kept_turns:
             for record in turn.lines:
