@@ -24,29 +24,31 @@
 
 set -euo pipefail
 
-# Resolve supercompact installation root
-# Layout: ~/.local/share/supercompact/claude-code/plugin/hooks-handlers/THIS_SCRIPT
-#         ~/.local/share/supercompact/claude-code/supercompact/compact.py
+# Resolve supercompact repo root (contains compact.py)
+# Layout from repo:   .../supercompact/plugins/claude-code/hooks-handlers/THIS_SCRIPT
+# Layout installed:   ~/.local/share/supercompact/claude-code/plugin/hooks-handlers/THIS_SCRIPT
+#                     ~/.local/share/supercompact/claude-code/supercompact/compact.py
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-INSTALL_ROOT="$(cd "${PLUGIN_ROOT}/.." && pwd)"
-SUPERCOMPACT_DIR="${INSTALL_ROOT}/supercompact"
 
-if [[ ! -f "${SUPERCOMPACT_DIR}/compact.py" ]]; then
-  # Fallback: check if supercompact is bundled inside the plugin dir (dev mode)
-  if [[ -f "${PLUGIN_ROOT}/supercompact/compact.py" ]]; then
-    SUPERCOMPACT_DIR="${PLUGIN_ROOT}/supercompact"
-  else
-    echo "$(date -Iseconds) ERROR: supercompact not found at ${SUPERCOMPACT_DIR}" >> "${HOME}/.cache/supercompact/hook.log" 2>/dev/null
-    exit 0
-  fi
+# Ensure log dir exists before any logging
+LOG_DIR="${HOME}/.cache/supercompact"
+mkdir -p "${LOG_DIR}"
+
+# Try repo layout first: hooks-handlers -> claude-code -> plugins -> repo root
+REPO_ROOT="$(cd "${PLUGIN_ROOT}/../.." 2>/dev/null && pwd)"
+if [[ -f "${REPO_ROOT}/compact.py" ]]; then
+  SUPERCOMPACT_DIR="${REPO_ROOT}"
+# Installed layout: plugin -> claude-code -> supercompact/
+elif [[ -f "${PLUGIN_ROOT}/../supercompact/compact.py" ]]; then
+  SUPERCOMPACT_DIR="$(cd "${PLUGIN_ROOT}/../supercompact" && pwd)"
+else
+  echo "$(date -Iseconds) ERROR: compact.py not found (tried ${REPO_ROOT} and ${PLUGIN_ROOT}/../supercompact)" >> "${LOG_DIR}/hook.log"
+  exit 0
 fi
 
 METHOD="${PLUGIN_SETTING_METHOD:-eitf}"
 BUDGET="${PLUGIN_SETTING_BUDGET:-80000}"
-LOG_DIR="${HOME}/.cache/supercompact"
-
-mkdir -p "${LOG_DIR}"
 
 # Read hook input from stdin (JSON with transcript_path, session_id, trigger, etc.)
 HOOK_INPUT=$(cat)
