@@ -1,20 +1,22 @@
 # Supercompact — Claude Code Plugin
 
-Entity-preservation conversation compaction for Claude Code. Replaces the built-in LLM-based `/compact` with EITF scoring — **~400x faster** and **2x better entity retention**.
+Entity-preservation conversation compaction for Claude Code. **~400x faster** and **2x better entity retention** than the built-in LLM-based `/compact`.
 
 ## Quick Install
 
 ```bash
-git clone https://github.com/yourusername/supercompact.git
+git clone https://github.com/heiervang-technologies/supercompact.git
 cd supercompact/plugins/claude-code
 ./install.sh
 ```
 
-**Prerequisites:** Python 3.11+, [uv](https://github.com/astral-sh/uv)
+The installer automatically registers the plugin in `~/.claude/settings.json`. Restart Claude Code, then use `/supercompact`.
+
+**Prerequisites:** Python 3.11+, [uv](https://github.com/astral-sh/uv), jq
 
 ## What It Does
 
-When Claude Code compacts your conversation (either automatically or via `/compact`), it normally calls an LLM to summarize — slow (~30s) and lossy. Supercompact replaces this with **EITF** (Entity-frequency Inverse Turn Frequency), a zero-model algorithm that:
+When Claude Code compacts your conversation (either automatically or via `/compact`), it normally calls an LLM to summarize — slow (~30s) and lossy. Supercompact uses **EITF** (Entity-frequency Inverse Turn Frequency), a zero-model algorithm that:
 
 1. Extracts structured entities (file paths, errors, functions, URLs, etc.)
 2. Scores each conversation turn by entity importance × rarity
@@ -25,13 +27,13 @@ Result: compaction in **~0.2 seconds** with **2x better retention** of file path
 
 ## How It Works
 
-The installer sets up three integration points:
+The plugin provides three integration points:
 
-1. **cli.js patch** — Replaces the LLM API call in Claude Code's main compaction function with a subprocess call to supercompact. Falls back to the original LLM on error.
+1. **`/supercompact` command** — On-demand compaction. Replaces the session with a compacted version and restarts. This is the primary interface.
 
-2. **PreCompact hook** — Backs up the full transcript before any compaction runs, and produces a supercompact alternative alongside Claude's built-in result.
+2. **PreCompact hook** — When Claude's built-in compaction triggers, the hook backs up the full transcript before it's lost. The backup is saved as `*.pre-compact-full` alongside the session JSONL.
 
-3. **`/supercompact` command** — Manual on-demand compaction with configurable method and budget.
+3. **cli.js patch** *(npm installations only)* — Replaces the LLM API call in Claude Code's compaction function with supercompact. Falls back to the original LLM on error. Not available on standalone binary installations.
 
 ## Configuration
 
@@ -70,6 +72,16 @@ Manual compaction. Examples:
 ./install.sh --patch-only   # Patch cli.js only (plugin must be installed first)
 ```
 
+## Update
+
+```bash
+cd supercompact
+git pull
+./plugins/claude-code/install.sh
+```
+
+Re-running the installer is safe — it replaces all files and is fully idempotent.
+
 ## Uninstall
 
 ```bash
@@ -95,15 +107,25 @@ Manual compaction. Examples:
     ├── hooks/
     │   └── hooks.json     # PreCompact hook registration
     ├── hooks-handlers/
-    │   └── supercompact-precompact.sh
+    │   └── supercompact-precompact.sh  # Backup-only hook
     └── scripts/
-        ├── patcher.py     # cli.js patching logic
+        ├── compact-session.sh  # Main compaction script
+        ├── patcher.py          # cli.js patching logic
         └── patch-compaction.sh
 ```
 
 ## Logs
 
 Hook activity is logged to `~/.cache/supercompact/hook.log`.
+
+## Standalone Binary Installation
+
+If Claude Code is installed as a standalone binary (not via npm), the cli.js patch cannot be applied. The installer detects this automatically, skips patching, and configures `settings.json` for you.
+
+In standalone mode:
+- **`/supercompact`** — Works fully. This is the primary way to compact.
+- **`/compact`** — Still uses Claude's built-in LLM compaction (cannot be replaced without cli.js patch).
+- **PreCompact hook** — Backs up the full transcript before Claude's built-in compaction runs.
 
 ## Troubleshooting
 
@@ -118,7 +140,7 @@ Check `~/.cache/supercompact/hook.log` for errors. Common causes:
 - Python/uv not in PATH during compaction
 - Supercompact directory removed or corrupted
 
-**Verify patch status:**
+**Verify patch status (npm installations only):**
 ```bash
 grep -c "SUPERCOMPACT_EITF" "$(readlink -f "$(which claude)" | sed 's|[^/]*$|cli.js|')"
 # 1 = patched, 0 = not patched

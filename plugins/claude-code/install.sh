@@ -168,19 +168,39 @@ if [[ "$DO_INSTALL" == true ]]; then
 
     ok "Plugin installed to ${INSTALL_DIR}"
 
-    # Print plugin-dir usage
-    echo ""
-    info "To load the plugin, use one of:"
-    echo "    claude --plugin-dir ${PLUGIN_DEST}"
-    echo ""
-    echo "  Or add to ~/.claude/settings.json:"
-    echo "    { \"pluginDirs\": [\"${PLUGIN_DEST}\"] }"
-    echo ""
+    # Auto-configure settings.json to load the plugin
+    SETTINGS_FILE="${HOME}/.claude/settings.json"
+    info "Configuring Claude Code to load plugin..."
+    mkdir -p "$(dirname "${SETTINGS_FILE}")"
+
+    if [[ ! -f "${SETTINGS_FILE}" ]]; then
+        # Create settings.json with pluginDirs
+        echo '{"pluginDirs":["'"${PLUGIN_DEST}"'"]}' | jq . > "${SETTINGS_FILE}"
+        ok "Created ${SETTINGS_FILE} with pluginDirs"
+    elif jq -e '.pluginDirs' "${SETTINGS_FILE}" >/dev/null 2>&1; then
+        # pluginDirs exists — check if our path is already there
+        if jq -e --arg p "${PLUGIN_DEST}" '.pluginDirs | index($p)' "${SETTINGS_FILE}" >/dev/null 2>&1; then
+            ok "Plugin already registered in settings.json"
+        else
+            # Add our path to existing pluginDirs array
+            jq --arg p "${PLUGIN_DEST}" '.pluginDirs += [$p]' "${SETTINGS_FILE}" > "${SETTINGS_FILE}.tmp" \
+                && mv "${SETTINGS_FILE}.tmp" "${SETTINGS_FILE}"
+            ok "Added plugin to existing pluginDirs in settings.json"
+        fi
+    else
+        # settings.json exists but no pluginDirs key — add it
+        jq --arg p "${PLUGIN_DEST}" '. + {pluginDirs: [$p]}' "${SETTINGS_FILE}" > "${SETTINGS_FILE}.tmp" \
+            && mv "${SETTINGS_FILE}.tmp" "${SETTINGS_FILE}"
+        ok "Added pluginDirs to settings.json"
+    fi
 fi
 
 # ------------------------------------------------------------------
 # Patch cli.js
 # ------------------------------------------------------------------
+PATCH_APPLIED=false
+STANDALONE_BINARY=false
+
 if [[ "$DO_PATCH" == true ]]; then
     SUPERCOMPACT_DEST="${INSTALL_DIR}/supercompact"
 
@@ -188,16 +208,33 @@ if [[ "$DO_PATCH" == true ]]; then
         fatal "Supercompact not installed at ${SUPERCOMPACT_DEST}. Run install first (without --patch-only)."
     fi
 
-    echo ""
-    info "Patching Claude Code cli.js..."
-    bash "${INSTALL_DIR}/plugin/scripts/patch-compaction.sh" "${SUPERCOMPACT_DEST}"
-    EXIT_CODE=$?
+    # Detect standalone binary vs npm installation
+    CLAUDE_BIN="${CLAUDE_BIN:-$(which claude 2>/dev/null || echo "")}"
+    CLAUDE_REAL=""
+    if [[ -n "$CLAUDE_BIN" ]]; then
+        CLAUDE_REAL="$(readlink -f "$CLAUDE_BIN" 2>/dev/null || echo "$CLAUDE_BIN")"
+    fi
 
-    if [[ $EXIT_CODE -eq 0 ]]; then
-        ok "cli.js patched — compaction now uses supercompact"
+    if [[ -n "$CLAUDE_REAL" ]] && head -c 4 "$CLAUDE_REAL" 2>/dev/null | grep -q "ELF\|MZ"; then
+        STANDALONE_BINARY=true
+        echo ""
+        warn "Claude Code is installed as a standalone binary (not via npm)"
+        warn "cli.js patching is not available for standalone installations"
+        info "The /supercompact slash command and PreCompact hook will still work"
+        info "Use '/supercompact' for on-demand compaction"
     else
-        err "Patching failed (exit code $EXIT_CODE)"
-        exit $EXIT_CODE
+        echo ""
+        info "Patching Claude Code cli.js..."
+        bash "${INSTALL_DIR}/plugin/scripts/patch-compaction.sh" "${SUPERCOMPACT_DEST}"
+        EXIT_CODE=$?
+
+        if [[ $EXIT_CODE -eq 0 ]]; then
+            ok "cli.js patched — compaction now uses supercompact"
+            PATCH_APPLIED=true
+        else
+            warn "cli.js patching failed (exit code $EXIT_CODE)"
+            warn "The /supercompact slash command and PreCompact hook will still work"
+        fi
     fi
 fi
 
@@ -210,15 +247,19 @@ echo ""
 echo "What's installed:"
 echo "  • Supercompact library at ${INSTALL_DIR}/supercompact/"
 echo "  • Plugin at ${INSTALL_DIR}/plugin/"
-if [[ "$DO_PATCH" == true ]]; then
+echo "  • Plugin registered in ~/.claude/settings.json"
+if [[ "$PATCH_APPLIED" == true ]]; then
     echo "  • cli.js patched for automatic compaction replacement"
 fi
 echo ""
-echo "Configuration (via environment variables or plugin settings):"
-echo "  PLUGIN_SETTING_METHOD=eitf             # eitf, setcover, dedup"
-echo "  PLUGIN_SETTING_BUDGET=80000            # token budget"
-echo "  PLUGIN_SETTING_FALLBACK_TO_BUILTIN=true  # fall back to LLM on error"
-echo ""
-if [[ "$DO_PATCH" == true ]]; then
-    echo "Restart Claude Code to activate the patch."
+echo "Usage:"
+if [[ "$PATCH_APPLIED" == true ]]; then
+    echo "  /compact and /supercompact both use supercompact now."
+    echo "  Restart Claude Code to activate."
+else
+    echo "  /supercompact           # On-demand entity-preservation compaction"
+    echo "  /supercompact 120000    # Custom token budget"
 fi
+echo ""
+echo "To update later:  git pull && ./install.sh"
+echo "To uninstall:     ./uninstall.sh"
