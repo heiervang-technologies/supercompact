@@ -35,10 +35,21 @@ def _is_user_message(record: dict) -> bool:
     # Tool results injected by the system have sourceToolAssistantUUID
     if record.get("sourceToolAssistantUUID"):
         return False
+    # Check origin for task notifications
+    origin = record.get("origin", {})
+    if isinstance(origin, dict) and origin.get("kind") == "task-notification":
+        return False
+        
     msg = record.get("message", {})
     content = msg.get("content")
-    # String content is always a user message
+    # String content is always a user message, unless it's a known system-injected block
     if isinstance(content, str):
+        if content.startswith("<task-notification>"):
+            return False
+        if content.startswith("<local-command-stdout>"):
+            return False
+        if "This session is being continued from a previous conversation" in content:
+            return False
         return True
     # List content: user messages have text blocks, not tool_result blocks
     if isinstance(content, list):

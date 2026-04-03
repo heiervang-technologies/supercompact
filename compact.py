@@ -66,13 +66,27 @@ def cmd_compact(args: argparse.Namespace) -> int:
     total_tokens = sum(token_counts.values())
     console.print(f"  {total_tokens:,} tokens total")
 
-    if total_tokens <= args.budget:
-        console.print(f"[green]Already within budget ({total_tokens:,} <= {args.budget:,}), nothing to compact.[/green]")
-        return 0
-
-    # Identify long system turns that need scoring
+    # Identify long/short system turns (needed for both within-budget and compaction paths)
     long_system = [t for t in system_turns if token_counts.get(t.index, 0) > args.short_threshold]
     short_system = [t for t in system_turns if token_counts.get(t.index, 0) <= args.short_threshold]
+
+    if args.method == "nuclear":
+        from lib.nuclear import nuclear_compact
+        result = nuclear_compact(turns, args.budget)
+        print_stats(result, verbose=args.verbose)
+        if args.output:
+            fmt = getattr(args, "format", "jsonl")
+            if fmt == "summary":
+                write_summary_text(result, args.output)
+            else:
+                write_compacted_jsonl(result, args.output)
+        return 0
+
+    target_with_padding = int(args.budget * 1.10)
+    if total_tokens <= target_with_padding:
+        console.print(f"[green]Already within budget padding ({total_tokens:,} <= {target_with_padding:,}), nothing to compact.[/green]")
+        # Exiting without writing the output file signals the wrapper script to abort compaction
+        return 0
 
     console.print(f"  {len(short_system)} short system turns (always kept)")
     console.print(f"  {len(long_system)} long system turns (to be scored)")
@@ -107,6 +121,12 @@ def cmd_compact(args: argparse.Namespace) -> int:
         budget=args.budget,
         short_threshold=args.short_threshold,
     )
+    
+    total_kept = result.user_tokens + result.short_system_tokens + result.scored_kept_tokens
+    if total_kept > args.budget:
+        console.print(f"\n[yellow]Primary method '{args.method}' couldn't reach budget ({total_kept:,} > {args.budget:,}). Falling back to NUCLEAR truncation.[/yellow]")
+        from lib.nuclear import nuclear_compact
+        result = nuclear_compact(result.kept_turns, args.budget)
 
     t_elapsed = time.monotonic() - t_start
 
