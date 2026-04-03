@@ -182,6 +182,19 @@ def write_compacted_jsonl(result: SelectionResult, output_path: Path) -> None:
         for record in reversed(turn.lines):
             if isinstance(record, dict) and "uuid" in record and record.get("type") in ("user", "assistant", "system", "attachment"):
                 last_uuid = record["uuid"]
+                
+                # FIX: If this is the absolute last assistant message in the kept turns,
+                # we must clear its stale API usage data. Claude Code uses this usage object
+                # to render the top-level token count. If we don't clear it, Claude Code will
+                # still show the massive 150k+ token count from before compaction.
+                if record.get("type") == "assistant" and "message" in record and turn is result.kept_turns[-1]:
+                    if "usage" in record["message"]:
+                        record["message"]["usage"] = {
+                            "input_tokens": result.scored_kept_tokens,
+                            "cache_creation_input_tokens": 0,
+                            "cache_read_input_tokens": 0,
+                            "output_tokens": 0
+                        }
                 break
 
     with open(output_path, "w") as f:

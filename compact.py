@@ -66,23 +66,15 @@ def cmd_compact(args: argparse.Namespace) -> int:
     total_tokens = sum(token_counts.values())
     console.print(f"  {total_tokens:,} tokens total")
 
-    if total_tokens <= args.budget:
-        console.print(f"[green]Already within budget ({total_tokens:,} <= {args.budget:,}), nothing to compact.[/green]")
+    # Identify long/short system turns (needed for both within-budget and compaction paths)
+    long_system = [t for t in system_turns if token_counts.get(t.index, 0) > args.short_threshold]
+    short_system = [t for t in system_turns if token_counts.get(t.index, 0) <= args.short_threshold]
+
+    if args.method == "nuclear":
+        from lib.nuclear import nuclear_compact
+        result = nuclear_compact(turns, args.budget)
+        print_stats(result, verbose=args.verbose)
         if args.output:
-            from lib.selector import SelectionResult
-            # Wrap in SelectionResult and just use all turns as kept_turns
-            result = SelectionResult(
-                kept_turns=turns,
-                kept_scored=[],
-                dropped_turns=[],
-                budget=args.budget,
-                short_threshold=args.short_threshold,
-                user_tokens=sum(token_counts.get(t.index, 0) for t in user_turns),
-                short_system_tokens=sum(token_counts.get(t.index, 0) for t in short_system),
-                scored_kept_tokens=0,
-                scored_dropped_tokens=0,
-                total_input_tokens=total_tokens,
-            )
             fmt = getattr(args, "format", "jsonl")
             if fmt == "summary":
                 write_summary_text(result, args.output)
@@ -90,9 +82,11 @@ def cmd_compact(args: argparse.Namespace) -> int:
                 write_compacted_jsonl(result, args.output)
         return 0
 
-    # Identify long system turns that need scoring
-    long_system = [t for t in system_turns if token_counts.get(t.index, 0) > args.short_threshold]
-    short_system = [t for t in system_turns if token_counts.get(t.index, 0) <= args.short_threshold]
+    target_with_padding = int(args.budget * 1.10)
+    if total_tokens <= target_with_padding:
+        console.print(f"[green]Already within budget padding ({total_tokens:,} <= {target_with_padding:,}), nothing to compact.[/green]")
+        # Exiting without writing the output file signals the wrapper script to abort compaction
+        return 0
 
     console.print(f"  {len(short_system)} short system turns (always kept)")
     console.print(f"  {len(long_system)} long system turns (to be scored)")
@@ -127,6 +121,12 @@ def cmd_compact(args: argparse.Namespace) -> int:
         budget=args.budget,
         short_threshold=args.short_threshold,
     )
+    
+    total_kept = result.user_tokens + result.short_system_tokens + result.scored_kept_tokens
+    if total_kept > args.budget:
+        console.print(f"\n[yellow]Primary method '{args.method}' couldn't reach budget ({total_kept:,} > {args.budget:,}). Falling back to NUCLEAR truncation.[/yellow]")
+        from lib.nuclear import nuclear_compact
+        result = nuclear_compact(result.kept_turns, args.budget)
 
     t_elapsed = time.monotonic() - t_start
 
