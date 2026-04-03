@@ -204,6 +204,24 @@ def write_compacted_jsonl(result: SelectionResult, output_path: Path) -> None:
     console.print(f"\nWrote compacted JSONL to {output_path}")
 
 
+def append_archive_jsonl(result: SelectionResult, input_path: Path) -> None:
+    """Append fully dropped turns to a persistent archive JSONL file.
+    
+    This acts as a searchable history database of all discarded context.
+    """
+    if not result.dropped_turns:
+        return
+        
+    # e.g., <uuid>.jsonl -> <uuid>.archive.jsonl
+    archive_path = input_path.with_name(input_path.name.replace(".jsonl", ".archive.jsonl"))
+    
+    with open(archive_path, "a") as f:
+        for st in sorted(result.dropped_turns, key=lambda s: s.turn.index):
+            for record in st.turn.lines:
+                f.write(json.dumps(record) + "\n")
+    console.print(f"Appended {len(result.dropped_turns)} dropped turns to archive database: {archive_path}")
+
+
 def write_scores_csv(
     scored: list[ScoredTurn],
     kept_indices: set[int],

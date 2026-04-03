@@ -35,7 +35,7 @@ from lib.parser import parse_jsonl, extract_text
 from lib.tokenizer import turn_tokens, estimate_tokens
 from lib.types import ScoredTurn, build_query, random_scores
 from lib.selector import select_turns
-from lib.formatter import print_stats, write_compacted_jsonl, write_summary_text, write_scores_csv
+from lib.formatter import print_stats, write_compacted_jsonl, write_summary_text, write_scores_csv, append_archive_jsonl
 from lib.scorer_base import SCORERS, LOCAL_METHODS, ALL_METHODS, get_scorer
 
 console = Console()
@@ -80,6 +80,7 @@ def cmd_compact(args: argparse.Namespace) -> int:
                 write_summary_text(result, args.output)
             else:
                 write_compacted_jsonl(result, args.output)
+                append_archive_jsonl(result, args.jsonl_file)
         return 0
 
     target_with_padding = int(args.budget * 1.10)
@@ -140,6 +141,7 @@ def cmd_compact(args: argparse.Namespace) -> int:
             write_summary_text(result, args.output)
         else:
             write_compacted_jsonl(result, args.output)
+            append_archive_jsonl(result, args.jsonl_file)
 
     if args.scores_file:
         kept_indices = {t.index for t in result.kept_turns}
