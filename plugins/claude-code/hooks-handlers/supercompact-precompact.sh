@@ -67,7 +67,9 @@ JSONL_SIZE=$(wc -l < "${JSONL_FILE}")
 echo "$(date -Iseconds) Transcript: ${JSONL_FILE} (${JSONL_SIZE} lines)" >> "${LOG_DIR}/hook.log"
 
 # 1. Back up the full transcript before Claude's compaction destroys detail
-BACKUP_FILE="${JSONL_FILE}.pre-compact-full"
+# Use a timestamped filename so consecutive compactions don't overwrite each other.
+BACKUP_STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP_FILE="${JSONL_FILE}.pre-compact-full.${BACKUP_STAMP}"
 cp "${JSONL_FILE}" "${BACKUP_FILE}"
 echo "$(date -Iseconds) Full backup saved: ${BACKUP_FILE}" >> "${LOG_DIR}/hook.log"
 
@@ -90,16 +92,20 @@ if uv run python compact.py "${JSONL_FILE}" \
   SC_SIZE=$(wc -l < "${SC_OUTPUT}")
   echo "$(date -Iseconds) Supercompact (${METHOD}): ${JSONL_SIZE} -> ${SC_SIZE} lines" >> "${LOG_DIR}/hook.log"
 
-  # Back up the pre-compaction JSONL (in addition to the .pre-compact-full backup above)
-  cp "${JSONL_FILE}" "${JSONL_FILE}.pre-supercompact"
+  # Back up the pre-compaction JSONL (in addition to the .pre-compact-full backup above).
+  # Timestamped so repeated compactions don't clobber prior backups.
+  cp "${JSONL_FILE}" "${JSONL_FILE}.pre-supercompact.${BACKUP_STAMP}"
 
   # Swap in the compacted version
   mv "${SC_OUTPUT}" "${JSONL_FILE}"
   echo "$(date -Iseconds) SUCCESS: Swapped compacted JSONL in-place" >> "${LOG_DIR}/hook.log"
 
-  # Clean up old backups (keep last 3 of each type)
-  ls -t "${JSONL_FILE}.pre-compact-full"* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
-  ls -t "${JSONL_FILE}.pre-supercompact"* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
+  # Clean up old backups (keep last 3 of each type). Now that names are
+  # timestamped, ls -t reliably orders them by creation time.
+  # shellcheck disable=SC2012
+  ls -t "${JSONL_FILE}".pre-compact-full.* 2>/dev/null | tail -n +4 | xargs -r rm -f 2>/dev/null || true
+  # shellcheck disable=SC2012
+  ls -t "${JSONL_FILE}".pre-supercompact.* 2>/dev/null | tail -n +4 | xargs -r rm -f 2>/dev/null || true
 
   # Restart Claude to load the compacted context — this kills the process
   # before the Anthropic API compaction call fires. unleash-refresh adds
