@@ -126,8 +126,14 @@ def cmd_compact(args: argparse.Namespace) -> int:
     total_kept = result.user_tokens + result.short_system_tokens + result.scored_kept_tokens
     if total_kept > args.budget:
         console.print(f"\n[yellow]Primary method '{args.method}' couldn't reach budget ({total_kept:,} > {args.budget:,}). Falling back to NUCLEAR truncation.[/yellow]")
+        # Preserve the primary pass's dropped turns so the archive captures them.
+        # nuclear_compact returns a fresh SelectionResult with no dropped_turns
+        # (it truncates in place instead of discarding turns).
+        primary_dropped = result.dropped_turns
         from lib.nuclear import nuclear_compact
         result = nuclear_compact(result.kept_turns, args.budget)
+        result.dropped_turns = primary_dropped
+        result.scored_dropped_tokens = sum(st.tokens for st in primary_dropped)
 
     t_elapsed = time.monotonic() - t_start
 
