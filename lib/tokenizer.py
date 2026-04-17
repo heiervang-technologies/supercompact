@@ -22,5 +22,9 @@ def estimate_tokens(text: str) -> int:
 
 
 def turn_tokens(turn: Turn) -> int:
-    """Count the tokens of an entire turn."""
-    return estimate_tokens(extract_text(turn))
+    """Count the tokens of an entire turn.
+
+    Uses the untruncated extraction so tool_use payloads (which the API
+    receives in full) are counted at their real size, not the scoring stub.
+    """
+    return estimate_tokens(extract_text(turn, truncate=False))

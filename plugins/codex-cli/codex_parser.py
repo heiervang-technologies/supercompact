@@ -183,7 +183,7 @@ def parse_codex_jsonl(path: Path) -> list:
     return turns
 
 
-def extract_codex_text(turn) -> str:
+def extract_codex_text(turn, *, truncate: bool = True) -> str:
     """Extract human-readable text from a Codex turn for scoring/display.
 
     Handles Codex's payload-wrapped format:
@@ -193,6 +193,10 @@ def extract_codex_text(turn) -> str:
     - Reasoning: payload.content[].text (reasoning_text type)
     - Turn context: payload.user_instructions
     - Compacted: payload.message
+
+    With ``truncate=False``, function call arguments and outputs are kept at
+    full length — use this for accurate token counting (the API sees them
+    untruncated). Default ``truncate=True`` keeps the short form for scoring.
     """
     parts: list[str] = []
 
@@ -244,7 +248,7 @@ def extract_codex_text(turn) -> str:
                 arguments = payload.get("arguments", "")
                 parts.append(f"[function_call: {name}]")
                 if isinstance(arguments, str) and arguments:
-                    if len(arguments) > 500:
+                    if truncate and len(arguments) > 500:
                         arguments = arguments[:500] + "..."
                     parts.append(arguments)
 
@@ -252,7 +256,7 @@ def extract_codex_text(turn) -> str:
             elif payload_type == "function_call_output":
                 output = payload.get("output", "")
                 if isinstance(output, str):
-                    if len(output) > 1000:
+                    if truncate and len(output) > 1000:
                         output = output[:1000] + "..."
                     parts.append(output)
 

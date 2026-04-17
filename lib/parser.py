@@ -120,11 +120,16 @@ def parse_jsonl(path: Path) -> list[Turn]:
     return turns
 
 
-def extract_text(turn: Turn) -> str:
+def extract_text(turn: Turn, *, truncate: bool = True) -> str:
     """Extract human-readable text from a turn for scoring/display.
 
     Concatenates message content strings, thinking text, tool_use names/inputs,
     and tool_result content into a single string.
+
+    With ``truncate=True`` (default), tool_use inputs are capped so relevance
+    scorers aren't dominated by large file contents. With ``truncate=False``,
+    the full payload is preserved — use this for accurate token counting,
+    since the API receives the untruncated tool input.
     """
     parts: list[str] = []
 
@@ -150,11 +155,11 @@ def extract_text(turn: Turn) -> str:
                     if isinstance(inp, dict):
                         for k, v in inp.items():
                             v_str = str(v)
-                            if len(v_str) > 500:
+                            if truncate and len(v_str) > 500:
                                 v_str = v_str[:500] + "..."
                             parts.append(f"  {k}: {v_str}")
                     elif isinstance(inp, str):
-                        parts.append(inp[:1000])
+                        parts.append(inp[:1000] if truncate else inp)
                 elif btype == "tool_result":
                     result_content = block.get("content", "")
                     if isinstance(result_content, str):
