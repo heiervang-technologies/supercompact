@@ -15,23 +15,17 @@ def nuclear_compact(turns: list[Turn], budget: int) -> SelectionResult:
     Maintains the structural integrity of the JSONL (UUIDs, turn types)
     but severely truncates long tool outputs and text blocks.
     """
-    console.print(f"Running NUCLEAR compaction with budget {budget:,} tokens...")
-    
     kept_turns = copy.deepcopy(turns)
-    
     total_tokens_before = sum(turn_tokens(t) for t in turns)
-    
-    # Simple strategy: iterative truncation
-    # First, truncate anything over 10,000 chars. Then 5000, 2000, 1000, 500
-    # Stop when we fit the budget.
-    
+
+    # Iterative truncation: shrink long blocks until we fit, or exhaust steps.
     current_tokens = total_tokens_before
-    
+    final_max_len: int | None = None
+
     for max_len in [10000, 5000, 2000, 1000, 500, 250, 100]:
         if current_tokens <= budget:
             break
-            
-        console.print(f"  Over budget ({current_tokens:,} > {budget:,}). Squashing to max {max_len} chars per block...")
+        final_max_len = max_len
         
         for i, turn in enumerate(kept_turns):
             for record in turn.lines:
@@ -65,6 +59,13 @@ def nuclear_compact(turns: list[Turn], budget: int) -> SelectionResult:
                                                 sub["text"] = text[:max_len//2] + f"\n\n...[TRUNCATED BY NUCLEAR (was {len(text)} chars)]...\n\n" + text[-max_len//2:]
 
         current_tokens = sum(turn_tokens(t) for t in kept_turns)
+
+    if final_max_len is not None:
+        status = "fit budget" if current_tokens <= budget else "gave up"
+        console.print(
+            f"Nuclear: {total_tokens_before:,} -> {current_tokens:,} tokens "
+            f"(budget {budget:,}, min block {final_max_len} chars, {status})"
+        )
 
     result = SelectionResult(
         kept_turns=kept_turns,
