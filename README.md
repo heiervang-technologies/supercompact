@@ -224,6 +224,18 @@ PLUGIN_SETTING_BUDGET=80000            # token budget
 PLUGIN_SETTING_FALLBACK_TO_BUILTIN=true  # fall back to LLM on error
 ```
 
+### Default token budget
+
+| Entry point | Default | Notes |
+|---|---|---|
+| `compact.py --budget` | 80,000 | CLI flag |
+| `compact_codex.py --budget` | 80,000 | CLI flag |
+| `compact-session.sh` (slash cmd) | 80,000 | `PLUGIN_SETTING_BUDGET` env |
+| `supercompact-precompact.sh` (PreCompact hook) | 80,000 | `PLUGIN_SETTING_BUDGET` env |
+| Patched `cli.js` (LLM fallback path) | `max(40% × preCompactTokenCount, 40000)` | Intentionally percentage-based: scales with context size when Claude's auto-compact fires |
+
+The patched `cli.js` path is the odd one out on purpose — when Claude's built-in auto-compact fires, the context size is known at call time (`preCompactTokenCount`), so scaling the target by a percentage gives consistent behavior regardless of how large the conversation grew. All the other entry points are explicitly invoked (manually or by the PreCompact hook) and use a fixed default.
+
 The Claude Code plugin also provides a `/supercompact` slash command for manual compaction:
 
 ```

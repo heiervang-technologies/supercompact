@@ -113,8 +113,15 @@ def build_replacement(m: re.Match, supercompact_dir: str) -> str:
         f'_fs=require("fs");'
         f'const _home=process.env.HOME||"/root";'
         f'const _rawMethod=process.env.PLUGIN_SETTING_METHOD||"eitf";'
+        # Only local, fast methods fit inside Claude Code's 30s execSync timeout.
+        # Server-backed methods (embed, llama-*) would either time out or spin
+        # up a model server mid-compact. For those, we skip supercompact and
+        # let the outer try/catch route to the built-in LLM fallback (which is
+        # precisely what the user would get if the patch weren't installed).
         f'const _allowedMethods={{"eitf":1,"setcover":1,"dedup":1}};'
-        f'const _method=_allowedMethods[_rawMethod]?_rawMethod:"eitf";'
+        f'if(!_allowedMethods[_rawMethod])'
+        f'throw new Error("SUPERCOMPACT_EITF:unsupported_method:"+_rawMethod);'
+        f'const _method=_rawMethod;'
         f'const _cfgBudget=process.env.PLUGIN_SETTING_BUDGET;'
         f'const _parsedBudget=_cfgBudget?parseInt(_cfgBudget,10):0;'
         f'const _budget=(_parsedBudget>0&&_parsedBudget===(_parsedBudget|0))?_parsedBudget'

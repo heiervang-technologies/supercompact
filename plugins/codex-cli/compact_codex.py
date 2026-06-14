@@ -139,9 +139,10 @@ def _run_compaction(
     total_tokens = sum(token_counts.values())
     console.print(f"  {total_tokens:,} tokens total")
 
-    if total_tokens <= budget:
+    target_with_padding = int(budget * 1.10)
+    if total_tokens <= target_with_padding:
         console.print(
-            f"[green]Already within budget ({total_tokens:,} <= {budget:,}), "
+            f"[green]Already within budget padding ({total_tokens:,} <= {target_with_padding:,}), "
             f"nothing to compact.[/green]"
         )
         return 0
@@ -183,6 +184,18 @@ def _run_compaction(
         budget=budget,
         short_threshold=short_threshold,
     )
+
+    total_kept = result.user_tokens + result.short_system_tokens + result.scored_kept_tokens
+    if total_kept > budget:
+        console.print(
+            f"\n[yellow]Primary method '{method}' couldn't reach budget "
+            f"({total_kept:,} > {budget:,}). Falling back to NUCLEAR truncation.[/yellow]"
+        )
+        primary_dropped = result.dropped_turns
+        from lib.nuclear import nuclear_compact
+        result = nuclear_compact(result.kept_turns, budget)
+        result.dropped_turns = primary_dropped
+        result.scored_dropped_tokens = sum(st.tokens for st in primary_dropped)
 
     t_elapsed = time.monotonic() - t_start
 

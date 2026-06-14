@@ -86,7 +86,10 @@ def select_turns(
         tc = token_counts.get(last_system.index, 0)
         kept_indices.add(last_system.index)
         used_tokens += tc
-        # Track it in scored_kept if it was scored
+        # The tail turn is long (short system turns are already in kept_indices).
+        # Its tokens must flow into scored_kept_tokens so total_kept accounting
+        # reflects reality and callers can detect budget overshoot.
+        result.scored_kept_tokens += tc
         if last_system.index in scored_map:
             result.kept_scored.append(scored_map[last_system.index])
 
