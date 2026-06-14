@@ -120,11 +120,51 @@ def parse_jsonl(path: Path) -> list[Turn]:
     return turns
 
 
+_ATTACHMENT_TEXT_FIELDS = (
+    "content",
+    "stdout",
+    "stderr",
+    "prompt",
+    "snippet",
+    "command",
+)
+
+_ATTACHMENT_LIST_FIELDS = (
+    "addedLines",
+    "addedNames",
+    "removedNames",
+)
+
+
+def _extract_attachment_text(att: dict) -> list[str]:
+    """Pull Claude-visible text out of an attachment record.
+
+    Attachments carry hook output (stdout/stderr/command), file reads
+    (content/displayPath), slash command listings (content), prompt
+    previews, system reminders, etc. All of this gets injected into the
+    model's context — so it has to count toward the token budget.
+    """
+    out: list[str] = []
+    subtype = att.get("type", "")
+    if subtype:
+        out.append(f"[attachment:{subtype}]")
+    for field in _ATTACHMENT_TEXT_FIELDS:
+        v = att.get(field)
+        if isinstance(v, str) and v:
+            out.append(v)
+    for field in _ATTACHMENT_LIST_FIELDS:
+        v = att.get(field)
+        if isinstance(v, list):
+            for item in v:
+                out.append(str(item))
+    return out
+
+
 def extract_text(turn: Turn, *, truncate: bool = True) -> str:
     """Extract human-readable text from a turn for scoring/display.
 
     Concatenates message content strings, thinking text, tool_use names/inputs,
-    and tool_result content into a single string.
+    tool_result content, and attachment payloads into a single string.
 
     With ``truncate=True`` (default), tool_use inputs are capped so relevance
     scorers aren't dominated by large file contents. With ``truncate=False``,
@@ -134,6 +174,12 @@ def extract_text(turn: Turn, *, truncate: bool = True) -> str:
     parts: list[str] = []
 
     for record in turn.lines:
+        # Attachment records carry hook output / file reads / slash command
+        # output — injected into context but not wrapped in message.content.
+        attachment = record.get("attachment")
+        if isinstance(attachment, dict):
+            parts.extend(_extract_attachment_text(attachment))
+
         msg = record.get("message", {})
         content = msg.get("content")
 
